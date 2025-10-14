@@ -32,13 +32,7 @@ async function runAndLogCommand(sandbox: Sandbox, command: string, args: string[
 
 export async function createSandbox(config: SandboxConfig, logger: TaskLogger): Promise<SandboxResult> {
   try {
-    const hasRepo = config.repoUrl && config.repoUrl.trim() !== ''
-
-    if (hasRepo) {
-      await logger.info(`Repository URL: ${redactSensitiveInfo(config.repoUrl!)}`)
-    } else {
-      await logger.info('No repository specified - creating blank sandbox')
-    }
+    await logger.info(`Repository URL: ${redactSensitiveInfo(config.repoUrl)}`)
 
     // Check for cancellation before starting
     if (config.onCancellationCheck && (await config.onCancellationCheck())) {
@@ -52,44 +46,35 @@ export async function createSandbox(config: SandboxConfig, logger: TaskLogger): 
     }
 
     // Validate required environment variables
-    const envValidation = validateEnvironmentVariables(config.selectedAgent)
+    const envValidation = validateEnvironmentVariables(config.selectedAgent, config.githubToken, config.apiKeys)
     if (!envValidation.valid) {
       throw new Error(envValidation.error!)
     }
     await logger.info('Environment variables validated')
 
-    let authenticatedRepoUrl: string | undefined
-    let branchNameForEnv: string | undefined
+    // Handle private repository authentication
+    const authenticatedRepoUrl = createAuthenticatedRepoUrl(config.repoUrl)
+    await logger.info('Added GitHub authentication to repository URL')
 
-    if (hasRepo) {
-      // Handle private repository authentication
-      authenticatedRepoUrl = createAuthenticatedRepoUrl(config.repoUrl!)
-      await logger.info('Added GitHub authentication to repository URL')
-
-      // For initial clone, only use existing branch names, not AI-generated ones
-      // AI-generated branch names will be created later inside the sandbox
-      branchNameForEnv = config.existingBranchName
-    }
+    // For initial clone, only use existing branch names, not AI-generated ones
+    // AI-generated branch names will be created later inside the sandbox
+    const branchNameForEnv = config.existingBranchName
 
     // Create sandbox with proper source configuration
-    const sandboxConfig: any = {
+    const sandboxConfig = {
       teamId: process.env.VERCEL_TEAM_ID!,
       projectId: process.env.VERCEL_PROJECT_ID!,
       token: process.env.VERCEL_TOKEN!,
-      timeout: config.timeout ? parseInt(config.timeout.replace(/\D/g, '')) * 60 * 1000 : 5 * 60 * 1000, // Convert to milliseconds
-      ports: config.ports || [3000],
-      runtime: config.runtime || 'node22',
-      resources: { vcpus: config.resources?.vcpus || 4 },
-    }
-
-    // Only add source config if we have a repo
-    if (hasRepo && authenticatedRepoUrl) {
-      sandboxConfig.source = {
+      source: {
         type: 'git' as const,
         url: authenticatedRepoUrl,
         revision: branchNameForEnv || 'main',
         depth: 1, // Shallow clone for faster setup
-      }
+      },
+      timeout: config.timeout ? parseInt(config.timeout.replace(/\D/g, '')) * 60 * 1000 : 5 * 60 * 1000, // Convert to milliseconds
+      ports: config.ports || [3000],
+      runtime: config.runtime || 'node22',
+      resources: { vcpus: config.resources?.vcpus || 4 },
     }
 
     await logger.info(
@@ -144,10 +129,10 @@ export async function createSandbox(config: SandboxConfig, logger: TaskLogger): 
         throw new Error('Sandbox creation timed out. Try with a smaller repository or fewer dependencies.')
       }
 
-      await logger.error(`Sandbox creation failed: ${errorMessage}`)
+      await logger.error('Sandbox creation failed')
       if (errorResponse) {
-        await logger.error(`HTTP Status: ${errorResponse.status}`)
-        await logger.error(`Response: ${JSON.stringify(errorResponse.data)}`)
+        await logger.error('HTTP error occurred')
+        await logger.error('Error response received')
       }
       throw error
     }
@@ -224,7 +209,7 @@ export async function createSandbox(config: SandboxConfig, logger: TaskLogger): 
 
         // If primary package manager fails, try npm as fallback (unless it was already npm)
         if (!installResult.success && packageManager !== 'npm') {
-          await logger.info(`${packageManager} failed, trying npm as fallback...`)
+          await logger.info('Package manager failed, trying npm as fallback')
 
           if (config.onProgress) {
             await config.onProgress(37, `${packageManager} failed, trying npm fallback...`)
@@ -304,10 +289,10 @@ export async function createSandbox(config: SandboxConfig, logger: TaskLogger): 
 
         if (!pipInstall.success) {
           await logger.info('pip install failed')
-          await logger.info(`pip exit code: ${pipInstall.exitCode}`)
+          await logger.info('pip install failed with exit code')
 
-          if (pipInstall.output) await logger.info(`pip stdout: ${pipInstall.output}`)
-          if (pipInstall.error) await logger.info(`pip stderr: ${pipInstall.error}`)
+          if (pipInstall.output) await logger.info('pip stdout available')
+          if (pipInstall.error) await logger.info('pip stderr available')
 
           // Don't throw error, just log it and continue
           await logger.info('Warning: Failed to install Python dependencies, but continuing with sandbox setup')
@@ -325,10 +310,10 @@ export async function createSandbox(config: SandboxConfig, logger: TaskLogger): 
     // Log sandbox readiness based on project type
     if (packageJsonCheck.success) {
       await logger.info('Node.js project detected, sandbox ready for development')
-      await logger.info(`Sandbox available at: ${domain}`)
+      await logger.info('Sandbox available')
     } else if (requirementsTxtCheck.success) {
       await logger.info('Python project detected, sandbox ready for development')
-      await logger.info(`Sandbox available at: ${domain}`)
+      await logger.info('Sandbox available')
 
       // Check if there's a common Python web framework entry point
       const flaskAppCheck = await runCommandInSandbox(sandbox, 'test', ['-f', 'app.py'])
@@ -341,7 +326,7 @@ export async function createSandbox(config: SandboxConfig, logger: TaskLogger): 
       }
     } else {
       await logger.info('Project type not detected, sandbox ready for general development')
-      await logger.info(`Sandbox available at: ${domain}`)
+      await logger.info('Sandbox available')
     }
 
     // Check for cancellation before Git configuration
@@ -367,50 +352,29 @@ export async function createSandbox(config: SandboxConfig, logger: TaskLogger): 
       await logger.info('Git repository detected')
     }
 
-    // Add debugging information about Git state
-    await logger.info('Debugging Git repository state...')
-    const gitStatusDebug = await runCommandInSandbox(sandbox, 'git', ['status', '--porcelain'])
-    await logger.info(`Git status (porcelain): ${gitStatusDebug.output || 'Clean working directory'}`)
-
-    const gitBranchDebug = await runCommandInSandbox(sandbox, 'git', ['branch', '-a'])
-    await logger.info(`Available branches: ${gitBranchDebug.output || 'No branches listed'}`)
-
-    const gitRemoteDebug = await runCommandInSandbox(sandbox, 'git', ['remote', '-v'])
-    await logger.info(`Git remotes: ${gitRemoteDebug.output || 'No remotes configured'}`)
-
-    // Configure Git to use GitHub token for authentication
-    if (process.env.GITHUB_TOKEN) {
-      await logger.info('Configuring Git authentication with GitHub token')
-      await runCommandInSandbox(sandbox, 'git', ['config', 'credential.helper', 'store'])
-
-      // Create credentials file with GitHub token
-      const credentialsContent = `https://${process.env.GITHUB_TOKEN}:x-oauth-basic@github.com`
-      await runCommandInSandbox(sandbox, 'sh', ['-c', `echo "${credentialsContent}" > ~/.git-credentials`])
-    }
-
     let branchName: string
 
     if (config.existingBranchName) {
       // Checkout existing branch for continuing work
-      await logger.info(`Checking out existing branch: ${config.existingBranchName}`)
+      await logger.info('Checking out existing branch')
       const checkoutResult = await runAndLogCommand(sandbox, 'git', ['checkout', config.existingBranchName], logger)
 
       if (!checkoutResult.success) {
-        throw new Error(`Failed to checkout existing branch ${config.existingBranchName}`)
+        throw new Error('Failed to checkout existing branch')
       }
 
       // Get the latest changes from remote
-      await logger.info('Pulling latest changes from remote...')
+      await logger.info('Pulling latest changes from remote')
       const pullResult = await runAndLogCommand(sandbox, 'git', ['pull', 'origin', config.existingBranchName], logger)
 
       if (pullResult.output) {
-        await logger.info(`Git pull output: ${pullResult.output}`)
+        await logger.info('Git pull completed')
       }
 
       branchName = config.existingBranchName
     } else if (config.preDeterminedBranchName) {
       // Use the AI-generated branch name
-      await logger.info(`Using pre-determined branch name: ${config.preDeterminedBranchName}`)
+      await logger.info('Using pre-determined branch name')
 
       // First check if the branch already exists locally
       const branchExistsLocal = await runCommandInSandbox(sandbox, 'git', [
@@ -422,7 +386,7 @@ export async function createSandbox(config: SandboxConfig, logger: TaskLogger): 
 
       if (branchExistsLocal.success) {
         // Branch exists locally, just check it out
-        await logger.info(`Branch ${config.preDeterminedBranchName} already exists locally, checking it out`)
+        await logger.info('Branch already exists locally, checking it out')
         const checkoutBranch = await runAndLogCommand(
           sandbox,
           'git',
@@ -431,10 +395,8 @@ export async function createSandbox(config: SandboxConfig, logger: TaskLogger): 
         )
 
         if (!checkoutBranch.success) {
-          await logger.info(
-            `Failed to checkout existing branch ${config.preDeterminedBranchName}: ${checkoutBranch.error}`,
-          )
-          throw new Error(`Failed to checkout Git branch ${config.preDeterminedBranchName}`)
+          await logger.info('Failed to checkout existing branch')
+          throw new Error('Failed to checkout Git branch')
         }
 
         branchName = config.preDeterminedBranchName
@@ -448,26 +410,57 @@ export async function createSandbox(config: SandboxConfig, logger: TaskLogger): 
         ])
 
         if (branchExistsRemote.success && branchExistsRemote.output?.trim()) {
-          // Branch exists on remote, check it out and track it
-          await logger.info(`Branch ${config.preDeterminedBranchName} exists on remote, checking it out`)
-          const checkoutRemoteBranch = await runAndLogCommand(
-            sandbox,
-            'git',
-            ['checkout', '-b', config.preDeterminedBranchName, `origin/${config.preDeterminedBranchName}`],
-            logger,
-          )
+          // Branch exists on remote, fetch and check it out
+          await logger.info('Branch exists on remote, fetching and checking it out')
 
-          if (!checkoutRemoteBranch.success) {
-            await logger.info(
-              `Failed to checkout remote branch ${config.preDeterminedBranchName}: ${checkoutRemoteBranch.error}`,
+          // Fetch the remote branch with refspec to create local tracking branch
+          const fetchBranch = await runCommandInSandbox(sandbox, 'git', [
+            'fetch',
+            'origin',
+            `${config.preDeterminedBranchName}:${config.preDeterminedBranchName}`,
+          ])
+
+          if (!fetchBranch.success) {
+            await logger.info('Failed to fetch remote branch, trying alternative method')
+
+            // Alternative: fetch all and then checkout
+            const fetchAll = await runCommandInSandbox(sandbox, 'git', ['fetch', 'origin'])
+            if (!fetchAll.success) {
+              await logger.info('Failed to fetch from origin')
+              throw new Error('Failed to fetch from remote Git repository')
+            }
+
+            // Create local branch tracking remote
+            const checkoutTracking = await runAndLogCommand(
+              sandbox,
+              'git',
+              ['checkout', '-b', config.preDeterminedBranchName, '--track', `origin/${config.preDeterminedBranchName}`],
+              logger,
             )
-            throw new Error(`Failed to checkout remote Git branch ${config.preDeterminedBranchName}`)
+
+            if (!checkoutTracking.success) {
+              await logger.info('Failed to checkout and track remote branch')
+              throw new Error('Failed to checkout remote Git branch')
+            }
+          } else {
+            // Successfully fetched, now checkout
+            const checkoutRemoteBranch = await runAndLogCommand(
+              sandbox,
+              'git',
+              ['checkout', config.preDeterminedBranchName],
+              logger,
+            )
+
+            if (!checkoutRemoteBranch.success) {
+              await logger.info('Failed to checkout remote branch')
+              throw new Error('Failed to checkout remote Git branch')
+            }
           }
 
           branchName = config.preDeterminedBranchName
         } else {
           // Branch doesn't exist, create it
-          await logger.info(`Creating new branch: ${config.preDeterminedBranchName}`)
+          await logger.info('Creating new branch')
           const createBranch = await runAndLogCommand(
             sandbox,
             'git',
@@ -476,16 +469,16 @@ export async function createSandbox(config: SandboxConfig, logger: TaskLogger): 
           )
 
           if (!createBranch.success) {
-            await logger.info(`Failed to create branch ${config.preDeterminedBranchName}: ${createBranch.error}`)
+            await logger.info('Failed to create branch')
             // Add debugging information
             const gitStatus = await runCommandInSandbox(sandbox, 'git', ['status'])
-            await logger.info(`Git status: ${gitStatus.output || 'No output'}`)
+            await logger.info('Git status retrieved')
             const gitBranch = await runCommandInSandbox(sandbox, 'git', ['branch', '-a'])
-            await logger.info(`Git branches: ${gitBranch.output || 'No output'}`)
-            throw new Error(`Failed to create Git branch ${config.preDeterminedBranchName}`)
+            await logger.info('Git branches retrieved')
+            throw new Error('Failed to create Git branch')
           }
 
-          await logger.info(`Successfully created branch: ${config.preDeterminedBranchName}`)
+          await logger.info('Successfully created branch')
           branchName = config.preDeterminedBranchName
         }
       }
@@ -495,22 +488,22 @@ export async function createSandbox(config: SandboxConfig, logger: TaskLogger): 
       const suffix = generateId()
       branchName = `agent/${timestamp}-${suffix}`
 
-      await logger.info(`No predetermined branch name, using timestamp-based: ${branchName}`)
+      await logger.info('No predetermined branch name, using timestamp-based branch')
       const createBranch = await runAndLogCommand(sandbox, 'git', ['checkout', '-b', branchName], logger)
 
       if (!createBranch.success) {
-        await logger.info(`Failed to create branch ${branchName}: ${createBranch.error}`)
+        await logger.info('Failed to create branch')
         // Add debugging information for fallback branch creation too
         const gitStatus = await runCommandInSandbox(sandbox, 'git', ['status'])
-        await logger.info(`Git status: ${gitStatus.output || 'No output'}`)
+        await logger.info('Git status retrieved')
         const gitBranch = await runCommandInSandbox(sandbox, 'git', ['branch', '-a'])
-        await logger.info(`Git branches: ${gitBranch.output || 'No output'}`)
+        await logger.info('Git branches retrieved')
         const gitLog = await runCommandInSandbox(sandbox, 'git', ['log', '--oneline', '-5'])
-        await logger.info(`Recent commits: ${gitLog.output || 'No commits'}`)
-        throw new Error(`Failed to create Git branch ${branchName}`)
+        await logger.info('Recent commits retrieved')
+        throw new Error('Failed to create Git branch')
       }
 
-      await logger.info(`Successfully created fallback branch: ${branchName}`)
+      await logger.info('Successfully created fallback branch')
     }
 
     return {
@@ -522,7 +515,7 @@ export async function createSandbox(config: SandboxConfig, logger: TaskLogger): 
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred'
     console.error('Sandbox creation error:', error)
-    await logger.error(`Error: ${errorMessage}`)
+    await logger.error('Error occurred during sandbox creation')
 
     return {
       success: false,

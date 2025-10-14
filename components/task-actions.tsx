@@ -21,9 +21,8 @@ import { toast } from 'sonner'
 import { VERCEL_DEPLOY_URL } from '@/lib/constants'
 import { useTasks } from '@/components/app-layout'
 import { Claude, Codex, Cursor, OpenCode } from '@/components/logos'
-
 interface TaskActionsProps {
-  task: Task
+  task: unknown
 }
 
 const CODING_AGENTS = [

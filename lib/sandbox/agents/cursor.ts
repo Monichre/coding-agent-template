@@ -3,6 +3,9 @@ import { runCommandInSandbox } from '../commands'
 import { AgentExecutionResult } from '../types'
 import { redactSensitiveInfo } from '@/lib/utils/logging'
 import { TaskLogger } from '@/lib/utils/task-logger'
+import { connectors } from '@/lib/db/schema'
+
+type Connector = typeof connectors.$inferSelect
 
 // Helper function to run command and collect
 async function runAndLogCommand(sandbox: Sandbox, command: string, args: string[], logger: TaskLogger) {
@@ -27,6 +30,7 @@ export async function executeCursorInSandbox(
   instruction: string,
   logger: TaskLogger,
   selectedModel?: string,
+  mcpServers?: Connector[],
 ): Promise<AgentExecutionResult> {
   try {
     // Executing Cursor CLI with instruction
@@ -57,7 +61,7 @@ export async function executeCursorInSandbox(
     for (const checkCmd of postInstallChecks) {
       const checkResult = await runAndLogCommand(sandbox, 'sh', ['-c', checkCmd], logger)
       if (logger && checkResult.output) {
-        await logger.info(`Post-install check "${checkCmd}": ${checkResult.output}`)
+        await logger.info('Post-install check completed')
       }
     }
 
@@ -110,7 +114,7 @@ export async function executeCursorInSandbox(
       for (const searchCmd of searchPaths) {
         const searchResult = await runAndLogCommand(sandbox, 'sh', ['-c', searchCmd], logger)
         if (logger && searchResult.output) {
-          await logger.info(`Search result for "${searchCmd}": ${searchResult.output}`)
+          await logger.info('Search completed')
         }
       }
 
@@ -132,6 +136,90 @@ export async function executeCursorInSandbox(
       }
     }
 
+    // Configure MCP servers if provided
+    if (mcpServers && mcpServers.length > 0) {
+      await logger.info('Configuring MCP servers')
+
+      // Create mcp.json configuration file
+      const mcpConfig: {
+        mcpServers: Record<
+          string,
+          | { url: string; headers?: Record<string, string> }
+          | { command: string; args?: string[]; env?: Record<string, string> }
+        >
+      } = {
+        mcpServers: {},
+      }
+
+      for (const server of mcpServers) {
+        const serverName = server.name.toLowerCase().replace(/[^a-z0-9]/g, '-')
+
+        if (server.type === 'local') {
+          // Local STDIO server - parse command string into command and args
+          const commandParts = server.command!.trim().split(/\s+/)
+          const executable = commandParts[0]
+          const args = commandParts.slice(1)
+
+          // Parse env from JSON string if present
+          let envObject: Record<string, string> | undefined
+          if (server.env) {
+            try {
+              envObject = JSON.parse(server.env)
+            } catch (e) {
+              await logger.info('Warning: Failed to parse env for MCP server')
+            }
+          }
+
+          mcpConfig.mcpServers[serverName] = {
+            command: executable,
+            ...(args.length > 0 ? { args } : {}),
+            ...(envObject ? { env: envObject } : {}),
+          }
+          await logger.info('Added local MCP server')
+        } else {
+          // Remote HTTP/SSE server
+          mcpConfig.mcpServers[serverName] = {
+            url: server.baseUrl!,
+          }
+
+          // Merge headers from oauth and env
+          const headers: Record<string, string> = {}
+          if (server.oauthClientSecret) {
+            headers.Authorization = `Bearer ${server.oauthClientSecret}`
+          }
+          if (server.oauthClientId) {
+            headers['X-Client-ID'] = server.oauthClientId
+          }
+          if (Object.keys(headers).length > 0) {
+            mcpConfig.mcpServers[serverName].headers = headers
+          }
+
+          await logger.info('Added remote MCP server')
+        }
+      }
+
+      // Write the mcp.json file to the Cursor config directory (not project directory)
+      const mcpConfigJson = JSON.stringify(mcpConfig, null, 2)
+      const createMcpConfigCmd = `mkdir -p ~/.cursor && cat > ~/.cursor/mcp.json << 'EOF'
+${mcpConfigJson}
+EOF`
+
+      await logger.info('Creating Cursor MCP configuration file...')
+      const mcpConfigResult = await runCommandInSandbox(sandbox, 'sh', ['-c', createMcpConfigCmd])
+
+      if (mcpConfigResult.success) {
+        await logger.info('MCP configuration file (~/.cursor/mcp.json) created successfully')
+
+        // Verify the file was created (without logging sensitive contents)
+        const verifyMcpConfig = await runCommandInSandbox(sandbox, 'test', ['-f', '~/.cursor/mcp.json'])
+        if (verifyMcpConfig.success) {
+          await logger.info('MCP configuration verified')
+        }
+      } else {
+        await logger.info('Warning: Failed to create MCP configuration file')
+      }
+    }
+
     // Execute Cursor CLI with the instruction using print mode and force flag for file modifications
     if (logger) {
       await logger.info('Starting Cursor CLI execution with instruction...')
@@ -145,24 +233,22 @@ export async function executeCursorInSandbox(
       logger,
     )
     if (logger) {
-      await logger.info(`Pre-execution cursor-agent check: ${preExecCheck.success ? 'FOUND' : 'NOT FOUND'}`)
+      await logger.info('Pre-execution cursor-agent check completed')
       if (preExecCheck.output) {
-        await logger.info(`cursor-agent location: ${preExecCheck.output}`)
+        await logger.info('cursor-agent location found')
       }
     }
 
     // Use the correct flags: -p for print mode (non-interactive), --force for file modifications
     // Try multiple approaches to find and execute cursor-agent
-    let result
 
     // Log what we're about to execute
     const modelFlag = selectedModel ? ` --model ${selectedModel}` : ''
     const logCommand = `cursor-agent -p --force --output-format json${modelFlag} "${instruction}"`
-    await logger.command(logCommand)
     if (logger) {
       await logger.command(logCommand)
       if (selectedModel) {
-        await logger.info(`Executing cursor-agent with model: ${selectedModel}`)
+        await logger.info('Executing cursor-agent with model')
       }
       await logger.info('Executing cursor-agent directly without shell wrapper')
     }
@@ -235,82 +321,76 @@ export async function executeCursorInSandbox(
       await logger.info('Cursor command started with output capture, monitoring for completion...')
     }
 
-    // Poll for completion instead of waiting for the API
+    // Wait for completion - let sandbox timeout handle the hard limit
     let attempts = 0
-    const maxAttempts = 60 // 60 seconds max
 
-    while (!isCompleted && attempts < maxAttempts) {
+    while (!isCompleted) {
       await new Promise((resolve) => setTimeout(resolve, 1000)) // Wait 1 second
       attempts++
 
-      if (attempts % 10 === 0 && logger) {
-        await logger.info(`Still waiting for completion... ${attempts}s elapsed`)
+      // Safety check: if we've been waiting over 4 minutes, break and check git status
+      // (sandbox timeout is 5 minutes, so we leave a buffer)
+      if (attempts > 240) {
+        if (logger) {
+          await logger.info('Approaching sandbox timeout, checking for changes...')
+        }
+        break
       }
     }
 
     if (isCompleted) {
       if (logger) {
-        await logger.info(`Cursor completed successfully in ${attempts} seconds`)
-      }
-
-      result = {
-        success: true,
-        output: capturedOutput,
-        error: capturedError,
-        command: logCommand,
+        await logger.info('Cursor completed successfully')
       }
     } else {
       if (logger) {
-        await logger.info('Timeout waiting for completion, but may have succeeded')
+        await logger.info('Cursor execution ended, checking for changes')
       }
+    }
 
-      result = {
-        success: false,
-        output: capturedOutput,
-        error: capturedError || 'Timeout waiting for completion',
-        command: logCommand,
-      }
+    const result = {
+      success: true, // We'll determine actual success based on git changes
+      output: capturedOutput,
+      error: capturedError,
+      command: logCommand,
     }
 
     // Log the output and error results (similar to Claude)
     if (result.output && result.output.trim()) {
       const redactedOutput = redactSensitiveInfo(result.output.trim())
       await logger.info(redactedOutput)
-      if (logger) {
-        await logger.info(redactedOutput)
-      }
     }
 
-    if (!result.success && result.error) {
+    if (result.error && result.error.trim()) {
       const redactedError = redactSensitiveInfo(result.error)
       await logger.error(redactedError)
-      if (logger) {
-        await logger.error(redactedError)
-      }
     }
 
     // Cursor CLI execution completed
 
-    // Check if any files were modified
+    // Check if any files were modified - this is the real indicator of success
     const gitStatusCheck = await runAndLogCommand(sandbox, 'git', ['status', '--porcelain'], logger)
     const hasChanges = gitStatusCheck.success && gitStatusCheck.output?.trim()
 
-    if (result.success) {
+    // Determine success based on whether changes were made
+    const actualSuccess = !!hasChanges
+
+    if (actualSuccess) {
       return {
         success: true,
-        output: `Cursor CLI executed successfully${hasChanges ? ' (Changes detected)' : ' (No changes made)'}`,
+        output: `Cursor CLI executed successfully (Changes detected)`,
         agentResponse: result.output || 'Cursor CLI completed the task',
         cliName: 'cursor',
-        changesDetected: !!hasChanges,
+        changesDetected: true,
         error: undefined,
       }
     } else {
       return {
         success: false,
-        error: `Cursor CLI failed: ${result.error || 'No error message'}`,
+        error: `Cursor CLI failed: No changes were made to the repository`,
         agentResponse: result.output,
         cliName: 'cursor',
-        changesDetected: !!hasChanges,
+        changesDetected: false,
       }
     }
   } catch (error: unknown) {

@@ -76,7 +76,6 @@ export function RepoSelector({
         // Fetch both user and organizations
         const [userResponse, orgsResponse] = await Promise.all([fetch('/api/github/user'), fetch('/api/github/orgs')])
 
-        const ownersList: GitHubOwner[] = []
         let personalAccount: GitHubOwner | null = null
 
         // Get user (personal account)
@@ -182,6 +181,7 @@ export function RepoSelector({
         }
       }, 100)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [repoDropdownOpen, repos?.length])
 
   // Filter repos based on search
@@ -191,9 +191,20 @@ export function RepoSelector({
       repo.description?.toLowerCase().includes(repoFilter.toLowerCase()),
   )
 
-  // Show first 50 filtered repos
-  const displayedRepos = filteredRepos.slice(0, 50)
+  // Show first 50 filtered repos, but always include the selected repo if it exists
+  let displayedRepos = filteredRepos.slice(0, 50)
   const hasMoreRepos = filteredRepos.length > 50
+
+  // Ensure selected repo is in the displayed list (if it matches current filter)
+  if (selectedRepo && repos.length > 0) {
+    const isInFilteredRepos = filteredRepos.find((repo) => repo.name === selectedRepo)
+    const isInDisplayedRepos = displayedRepos.find((repo) => repo.name === selectedRepo)
+
+    if (isInFilteredRepos && !isInDisplayedRepos) {
+      // Selected repo matches filter but is not in the first 50, so add it at the beginning
+      displayedRepos = [isInFilteredRepos, ...displayedRepos.slice(0, 49)]
+    }
+  }
 
   const handleOwnerChange = (value: string) => {
     onOwnerChange(value)
@@ -205,20 +216,44 @@ export function RepoSelector({
     onRepoChange(value)
   }
 
-  const triggerClassName =
+  const ownerTriggerClassName =
     size === 'sm'
-      ? 'w-auto min-w-[100px] border-0 bg-transparent shadow-none focus:ring-0 h-8 text-xs'
+      ? 'w-auto min-w-[32px] sm:min-w-[100px] border-0 bg-transparent shadow-none focus:ring-0 h-8 text-xs px-1 sm:px-3'
       : 'w-auto min-w-[140px] border-0 bg-transparent shadow-none focus:ring-0 h-8'
 
+  const repoTriggerClassName =
+    size === 'sm'
+      ? 'w-auto min-w-[80px] sm:min-w-[120px] max-w-[100px] sm:max-w-none border-0 bg-transparent shadow-none focus:ring-0 h-8 text-xs'
+      : 'w-auto min-w-[160px] border-0 bg-transparent shadow-none focus:ring-0 h-8'
+
+  // Find the selected owner for avatar display
+  const selectedOwnerData = owners.find((owner) => owner.login === selectedOwner)
+
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-1 sm:gap-2 h-8">
       <Select
         value={selectedOwner}
         onValueChange={handleOwnerChange}
         disabled={disabled || (loadingOwners && !selectedOwner)}
       >
-        <SelectTrigger className={triggerClassName}>
-          <SelectValue placeholder={loadingOwners && !selectedOwner ? 'Loading...' : 'Owner'} />
+        <SelectTrigger className={ownerTriggerClassName}>
+          {size === 'sm' && selectedOwnerData ? (
+            // Mobile: Show only avatar
+            <div className="flex items-center">
+              <Image
+                src={selectedOwnerData.avatar_url}
+                alt={selectedOwnerData.login}
+                width={20}
+                height={20}
+                className="w-5 h-5 rounded-full sm:hidden"
+              />
+              <span className="hidden sm:inline">
+                <SelectValue placeholder={loadingOwners && !selectedOwner ? 'Loading...' : 'Owner'} />
+              </span>
+            </div>
+          ) : (
+            <SelectValue placeholder={loadingOwners && !selectedOwner ? 'Loading...' : 'Owner'} />
+          )}
         </SelectTrigger>
         <SelectContent>
           {owners.map((owner) => (
@@ -240,7 +275,7 @@ export function RepoSelector({
 
       {selectedOwner && (
         <>
-          <span className="text-muted-foreground">/</span>
+          <span className="text-muted-foreground text-xs">/</span>
 
           <Select
             value={selectedRepo}
@@ -248,13 +283,7 @@ export function RepoSelector({
             disabled={disabled || loadingRepos}
             onOpenChange={setRepoDropdownOpen}
           >
-            <SelectTrigger
-              className={
-                size === 'sm'
-                  ? 'w-auto min-w-[120px] border-0 bg-transparent shadow-none focus:ring-0 h-8 text-xs'
-                  : 'w-auto min-w-[160px] border-0 bg-transparent shadow-none focus:ring-0 h-8'
-              }
-            >
+            <SelectTrigger className={repoTriggerClassName}>
               <SelectValue placeholder={loadingRepos ? 'Loading...' : 'Repo'} />
             </SelectTrigger>
             <SelectContent>

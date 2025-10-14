@@ -3,6 +3,9 @@ import { runCommandInSandbox } from '../commands'
 import { AgentExecutionResult } from '../types'
 import { redactSensitiveInfo } from '@/lib/utils/logging'
 import { TaskLogger } from '@/lib/utils/task-logger'
+import { connectors } from '@/lib/db/schema'
+
+type Connector = typeof connectors.$inferSelect
 
 // Helper function to run command and log it
 async function runAndLogCommand(sandbox: Sandbox, command: string, args: string[], logger: TaskLogger) {
@@ -45,6 +48,7 @@ export async function executeOpenCodeInSandbox(
   instruction: string,
   logger: TaskLogger,
   selectedModel?: string,
+  mcpServers?: Connector[],
 ): Promise<AgentExecutionResult> {
   try {
     // Executing OpenCode with instruction
@@ -94,7 +98,7 @@ export async function executeOpenCodeInSandbox(
 
       if (npmBinCheck.success && npmBinCheck.output) {
         const globalBinPath = npmBinCheck.output.trim()
-        console.log(`Global npm bin path: ${globalBinPath}`)
+        console.log('Global npm bin path retrieved')
 
         // Try running opencode from the global bin path
         const directPathCheck = await runAndLogCommand(
@@ -126,6 +130,94 @@ export async function executeOpenCodeInSandbox(
     console.log('OpenCode CLI verified successfully')
     if (logger) {
       await logger.success('OpenCode CLI verified successfully')
+    }
+
+    // Configure MCP servers if provided
+    if (mcpServers && mcpServers.length > 0) {
+      await logger.info('Configuring MCP servers')
+
+      // Create OpenCode opencode.json configuration file
+      const opencodeConfig: {
+        $schema: string
+        mcp: Record<
+          string,
+          | { type: 'local'; command: string[]; enabled: boolean; environment?: Record<string, string> }
+          | { type: 'remote'; url: string; enabled: boolean; headers?: Record<string, string> }
+        >
+      } = {
+        $schema: 'https://opencode.ai/config.json',
+        mcp: {},
+      }
+
+      for (const server of mcpServers) {
+        const serverName = server.name.toLowerCase().replace(/[^a-z0-9]/g, '-')
+
+        if (server.type === 'local') {
+          // Local MCP server - parse command string into executable and args
+          const commandParts = server.command!.trim().split(/\s+/)
+
+          // Parse env from JSON string if present
+          let envObject: Record<string, string> | undefined
+          if (server.env) {
+            try {
+              envObject = JSON.parse(server.env)
+            } catch (e) {
+              await logger.info('Warning: Failed to parse env for MCP server')
+            }
+          }
+
+          opencodeConfig.mcp[serverName] = {
+            type: 'local',
+            command: commandParts,
+            enabled: true,
+            ...(envObject ? { environment: envObject } : {}),
+          }
+
+          await logger.info('Added local MCP server')
+        } else {
+          // Remote MCP server
+          opencodeConfig.mcp[serverName] = {
+            type: 'remote',
+            url: server.baseUrl!,
+            enabled: true,
+          }
+
+          // Build headers object
+          const headers: Record<string, string> = {}
+          if (server.oauthClientSecret) {
+            headers.Authorization = `Bearer ${server.oauthClientSecret}`
+          }
+          if (server.oauthClientId) {
+            headers['X-Client-ID'] = server.oauthClientId
+          }
+          if (Object.keys(headers).length > 0) {
+            opencodeConfig.mcp[serverName].headers = headers
+          }
+
+          await logger.info('Added remote MCP server')
+        }
+      }
+
+      // Write the opencode.json file to the OpenCode config directory (not project directory)
+      const opencodeConfigJson = JSON.stringify(opencodeConfig, null, 2)
+      const createConfigCmd = `mkdir -p ~/.opencode && cat > ~/.opencode/config.json << 'EOF'
+${opencodeConfigJson}
+EOF`
+
+      await logger.info('Creating OpenCode MCP configuration file...')
+      const configResult = await runCommandInSandbox(sandbox, 'sh', ['-c', createConfigCmd])
+
+      if (configResult.success) {
+        await logger.info('OpenCode configuration file (~/.opencode/config.json) created successfully')
+
+        // Verify the file was created (without logging sensitive contents)
+        const verifyConfig = await runCommandInSandbox(sandbox, 'test', ['-f', '~/.opencode/config.json'])
+        if (verifyConfig.success) {
+          await logger.info('OpenCode MCP configuration verified')
+        }
+      } else {
+        await logger.info('Warning: Failed to create OpenCode configuration file')
+      }
     }
 
     // Set up authentication for OpenCode
@@ -212,7 +304,7 @@ export async function executeOpenCodeInSandbox(
     if (logger) {
       await logger.info('Executing OpenCode run command in non-interactive mode...')
       if (selectedModel) {
-        await logger.info(`Using selected model: ${selectedModel}`)
+        await logger.info('Using selected model')
       }
     }
 
@@ -265,7 +357,7 @@ export async function executeOpenCodeInSandbox(
       if (hasChanges) {
         console.log('OpenCode made changes to files:', hasChanges)
         if (logger) {
-          await logger.info(`Files changed: ${hasChanges}`)
+          await logger.info('Files checked for changes')
         }
       }
 

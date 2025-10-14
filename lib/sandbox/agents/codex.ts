@@ -3,6 +3,9 @@ import { runCommandInSandbox } from '../commands'
 import { AgentExecutionResult } from '../types'
 import { redactSensitiveInfo } from '@/lib/utils/logging'
 import { TaskLogger } from '@/lib/utils/task-logger'
+import { connectors } from '@/lib/db/schema'
+
+type Connector = typeof connectors.$inferSelect
 
 // Helper function to run command and log it
 async function runAndLogCommand(sandbox: Sandbox, command: string, args: string[], logger: TaskLogger) {
@@ -27,6 +30,7 @@ export async function executeCodexInSandbox(
   instruction: string,
   logger: TaskLogger,
   selectedModel?: string,
+  mcpServers?: Connector[],
 ): Promise<AgentExecutionResult> {
   try {
     // Executing Codex CLI with instruction
@@ -89,7 +93,7 @@ export async function executeCodexInSandbox(
 
     if (logger) {
       const keyType = isVercelKey ? 'Vercel AI Gateway' : 'OpenAI'
-      await logger.info(`Using ${keyType} API key: ${apiKey.substring(0, 10)}...${apiKey.substring(apiKey.length - 4)}`)
+      await logger.info('Using API key for authentication')
     }
 
     // According to the official Codex CLI docs, we should use 'exec' for non-interactive execution
@@ -124,7 +128,7 @@ export async function executeCodexInSandbox(
     })
 
     if (logger) {
-      await logger.info(`Codex CLI version test: ${versionTestResult.exitCode === 0 ? 'SUCCESS' : 'FAILED'}`)
+      await logger.info('Codex CLI version test completed')
     }
 
     // Create configuration file based on API key type
@@ -164,6 +168,62 @@ log_requests = true
 `
     }
 
+    // Add MCP servers configuration if provided
+    if (mcpServers && mcpServers.length > 0) {
+      await logger.info('Configuring MCP servers')
+
+      // Check if we need experimental RMCP client (for remote servers)
+      const hasRemoteServers = mcpServers.some((s) => s.type === 'remote')
+      if (hasRemoteServers) {
+        configToml = `experimental_use_rmcp_client = true\n\n` + configToml
+      }
+
+      for (const server of mcpServers) {
+        const serverName = server.name.toLowerCase().replace(/[^a-z0-9]/g, '-')
+
+        if (server.type === 'local') {
+          // Local STDIO server - parse command string into command and args
+          const commandParts = server.command!.trim().split(/\s+/)
+          const executable = commandParts[0]
+          const args = commandParts.slice(1)
+
+          configToml += `
+[mcp_servers.${serverName}]
+command = "${executable}"
+`
+          // Add args if provided
+          if (args.length > 0) {
+            configToml += `args = [${args.map((arg) => `"${arg}"`).join(', ')}]\n`
+          }
+
+          // Add env vars if provided
+          if (server.env && Object.keys(server.env).length > 0) {
+            configToml += `env = { ${Object.entries(server.env)
+              .map(([key, value]) => `"${key}" = "${value}"`)
+              .join(', ')} }\n`
+          }
+
+          await logger.info('Added local MCP server')
+        } else {
+          // Remote HTTP/SSE server
+          configToml += `
+[mcp_servers.${serverName}]
+url = "${server.baseUrl}"
+`
+          // Add bearer token if available (using oauthClientSecret)
+          if (server.oauthClientSecret) {
+            configToml += `bearer_token = "${server.oauthClientSecret}"\n`
+          }
+
+          await logger.info('Added remote MCP server')
+        }
+      }
+    }
+
+    if (logger) {
+      await logger.info('Creating Codex configuration file...')
+    }
+
     const configSetupResult = await sandbox.runCommand({
       cmd: 'sh',
       args: ['-c', `mkdir -p ~/.codex && cat > ~/.codex/config.toml << 'EOF'\n${configToml}EOF`],
@@ -172,31 +232,31 @@ log_requests = true
     })
 
     if (logger) {
-      await logger.info(`Codex config setup: ${configSetupResult.exitCode === 0 ? 'SUCCESS' : 'FAILED'}`)
+      await logger.info('Codex config setup completed')
     }
 
-    // Debug: Check if the config file was created correctly
+    // Debug: Check if the config file was created correctly (without logging sensitive contents)
     const configCheckResult = await sandbox.runCommand({
-      cmd: 'cat',
-      args: ['~/.codex/config.toml'],
+      cmd: 'test',
+      args: ['-f', '~/.codex/config.toml'],
       env: { HOME: '/home/vercel-sandbox' },
       sudo: false,
     })
 
     if (logger && configCheckResult.exitCode === 0) {
-      await logger.info('Config file contents verified')
+      await logger.info('Config file verified')
     }
 
     // Debug: List files in the current directory before running Codex
     const lsDebugResult = await runCommandInSandbox(sandbox, 'ls', ['-la'])
     if (logger) {
-      await logger.info(`Current directory contents:\n${lsDebugResult.output || 'No output from ls -la'}`)
+      await logger.info('Current directory contents retrieved')
     }
 
     // Debug: Show current working directory
     const pwdResult = await runCommandInSandbox(sandbox, 'pwd', [])
     if (logger) {
-      await logger.info(`Current working directory: ${pwdResult.output || 'Unknown'}`)
+      await logger.info('Current working directory retrieved')
     }
 
     // Use exec command with Vercel AI Gateway configuration

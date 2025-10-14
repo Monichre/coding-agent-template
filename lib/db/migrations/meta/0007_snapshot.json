@@ -1,4 +1,5 @@
 {
+<<<<<<< HEAD
   "id": "599a733d-7b3b-4b68-9ef2-d79e2695ada4",
   "prevId": "ddd9c9b3-d121-415c-a4f4-e820d9416a7a",
   "version": "7",
@@ -6,6 +7,15 @@
   "tables": {
     "public.custom_agents": {
       "name": "custom_agents",
+=======
+  "id": "6f540154-d47b-40e6-a00d-49a5edfc5f84",
+  "prevId": "94690b89-1d87-42e8-b519-a3ef49556369",
+  "version": "7",
+  "dialect": "postgresql",
+  "tables": {
+    "public.connectors": {
+      "name": "connectors",
+>>>>>>> 45c4c823485c42adfb0ef5674adf0e94996059b9
       "schema": "",
       "columns": {
         "id": {
@@ -24,6 +34,7 @@
           "name": "description",
           "type": "text",
           "primaryKey": false,
+<<<<<<< HEAD
           "notNull": true
         },
         "api_endpoint": {
@@ -34,34 +45,83 @@
         },
         "api_key": {
           "name": "api_key",
+=======
+          "notNull": false
+        },
+        "type": {
+          "name": "type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'remote'"
+        },
+        "base_url": {
+          "name": "base_url",
+>>>>>>> 45c4c823485c42adfb0ef5674adf0e94996059b9
           "type": "text",
           "primaryKey": false,
           "notNull": false
         },
+<<<<<<< HEAD
         "default_model": {
           "name": "default_model",
+=======
+        "oauth_client_id": {
+          "name": "oauth_client_id",
+>>>>>>> 45c4c823485c42adfb0ef5674adf0e94996059b9
           "type": "text",
           "primaryKey": false,
           "notNull": false
         },
+<<<<<<< HEAD
         "icon": {
           "name": "icon",
+=======
+        "oauth_client_secret": {
+          "name": "oauth_client_secret",
+>>>>>>> 45c4c823485c42adfb0ef5674adf0e94996059b9
           "type": "text",
           "primaryKey": false,
           "notNull": false
         },
+<<<<<<< HEAD
         "config_options": {
           "name": "config_options",
+=======
+        "command": {
+          "name": "command",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "args": {
+          "name": "args",
+>>>>>>> 45c4c823485c42adfb0ef5674adf0e94996059b9
           "type": "jsonb",
           "primaryKey": false,
           "notNull": false
         },
+<<<<<<< HEAD
         "is_active": {
           "name": "is_active",
           "type": "boolean",
           "primaryKey": false,
           "notNull": false,
           "default": true
+=======
+        "env": {
+          "name": "env",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'disconnected'"
+>>>>>>> 45c4c823485c42adfb0ef5674adf0e94996059b9
         },
         "created_at": {
           "name": "created_at",
@@ -86,6 +146,7 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+<<<<<<< HEAD
     "public.generated_images": {
       "name": "generated_images",
       "schema": "",
@@ -148,6 +209,8 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+=======
+>>>>>>> 45c4c823485c42adfb0ef5674adf0e94996059b9
     "public.tasks": {
       "name": "tasks",
       "schema": "",
@@ -204,12 +267,15 @@
           "notNull": true,
           "default": "'pending'"
         },
+<<<<<<< HEAD
         "queue_position": {
           "name": "queue_position",
           "type": "integer",
           "primaryKey": false,
           "notNull": false
         },
+=======
+>>>>>>> 45c4c823485c42adfb0ef5674adf0e94996059b9
         "progress": {
           "name": "progress",
           "type": "integer",
@@ -269,6 +335,7 @@
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
+<<<<<<< HEAD
     },
     "public.templates": {
       "name": "templates",
@@ -333,6 +400,8 @@
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
+=======
+>>>>>>> 45c4c823485c42adfb0ef5674adf0e94996059b9
     }
   },
   "enums": {},

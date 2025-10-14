@@ -3,20 +3,41 @@
 import { Task } from '@/lib/db/schema'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { AlertCircle, Plus, Clock, Settings } from 'lucide-react'
+import { AlertCircle, Plus, Trash2, Clock } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
-import { Claude, Codex, Cursor, OpenCode } from '@/components/logos'
+import { Claude, Codex, Cursor, Gemini, OpenCode } from '@/components/logos'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { Checkbox } from '@/components/ui/checkbox'
+import { useState } from 'react'
+import { toast } from 'sonner'
+import { useTasks } from '@/components/app-layout'
+import { useAtomValue } from 'jotai'
+import { sessionAtom } from '@/lib/atoms/session'
 
 // Model mappings for human-friendly names
 const AGENT_MODELS = {
   claude: [
-    { value: 'claude-sonnet-4-5-20250514', label: 'Sonnet 4.5' },
+    { value: 'claude-sonnet-4-5-20250929', label: 'Sonnet 4.5' },
+    { value: 'claude-sonnet-4-20250514', label: 'Sonnet 4' },
     { value: 'claude-opus-4-1-20250805', label: 'Opus 4.1' },
   ],
   codex: [
     { value: 'openai/gpt-5', label: 'GPT-5' },
+    { value: 'gpt-5-codex', label: 'GPT-5-Codex' },
+    { value: 'openai/gpt-5-mini', label: 'GPT-5 mini' },
+    { value: 'openai/gpt-5-nano', label: 'GPT-5 nano' },
+    { value: 'gpt-5-pro', label: 'GPT-5 pro' },
     { value: 'openai/gpt-4.1', label: 'GPT-4.1' },
     { value: 'gpt-4o', label: 'GPT-4o' },
   ],
@@ -26,17 +47,25 @@ const AGENT_MODELS = {
     { value: 'grok-beta', label: 'Grok Beta' },
   ],
   cursor: [
-    { value: 'openai/gpt-5', label: 'GPT-5' },
-    { value: 'openai/gpt-4.1', label: 'GPT-4.1' },
-    { value: 'gpt-4o', label: 'GPT-4o' },
-    { value: 'claude-sonnet-4-5-20250514', label: 'Sonnet 4.5' },
-    { value: 'claude-opus-4-1-20250805', label: 'Opus 4.1' },
+    { value: 'auto', label: 'Auto' },
+    { value: 'sonnet-4.5', label: 'Sonnet 4.5' },
+    { value: 'sonnet-4.5-thinking', label: 'Sonnet 4.5 Thinking' },
+    { value: 'gpt-5', label: 'GPT-5' },
+    { value: 'gpt-5-codex', label: 'GPT-5 Codex' },
+    { value: 'opus-4.1', label: 'Opus 4.1' },
+    { value: 'grok', label: 'Grok' },
+  ],
+  gemini: [
+    { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+    { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
   ],
   opencode: [
-    { value: 'openai/gpt-5', label: 'GPT-5' },
-    { value: 'openai/gpt-4.1', label: 'GPT-4.1' },
-    { value: 'gpt-4o', label: 'GPT-4o' },
-    { value: 'claude-sonnet-4-5-20250514', label: 'Sonnet 4.5' },
+    { value: 'gpt-5', label: 'GPT-5' },
+    { value: 'gpt-5-mini', label: 'GPT-5 Mini' },
+    { value: 'gpt-5-nano', label: 'GPT-5 Nano' },
+    { value: 'gpt-4.1', label: 'GPT-4.1' },
+    { value: 'claude-sonnet-4-5-20250929', label: 'Sonnet 4.5' },
+    { value: 'claude-sonnet-4-20250514', label: 'Sonnet 4' },
     { value: 'claude-opus-4-1-20250805', label: 'Opus 4.1' },
   ],
 } as const
@@ -49,6 +78,54 @@ interface TaskSidebarProps {
 
 export function TaskSidebar({ tasks, onTaskSelect, width = 288 }: TaskSidebarProps) {
   const pathname = usePathname()
+  const { refreshTasks, toggleSidebar } = useTasks()
+  const session = useAtomValue(sessionAtom)
+  const [isDeleting, setIsDeleting] = useState(false)
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [deleteCompleted, setDeleteCompleted] = useState(true)
+  const [deleteFailed, setDeleteFailed] = useState(true)
+  const [deleteStopped, setDeleteStopped] = useState(true)
+
+  // Close sidebar on mobile when navigating
+  const handleNewTaskClick = () => {
+    if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+      toggleSidebar()
+    }
+  }
+
+  const handleDeleteTasks = async () => {
+    if (!deleteCompleted && !deleteFailed && !deleteStopped) {
+      toast.error('Please select at least one task type to delete')
+      return
+    }
+
+    setIsDeleting(true)
+    try {
+      const actions = []
+      if (deleteCompleted) actions.push('completed')
+      if (deleteFailed) actions.push('failed')
+      if (deleteStopped) actions.push('stopped')
+
+      const response = await fetch(`/api/tasks?action=${actions.join(',')}`, {
+        method: 'DELETE',
+      })
+
+      if (response.ok) {
+        const result = await response.json()
+        toast.success(result.message)
+        await refreshTasks()
+        setShowDeleteDialog(false)
+      } else {
+        const error = await response.json()
+        toast.error(error.error || 'Failed to delete tasks')
+      }
+    } catch (error) {
+      console.error('Error deleting tasks:', error)
+      toast.error('Failed to delete tasks')
+    } finally {
+      setIsDeleting(false)
+    }
+  }
 
   const getHumanFriendlyModelName = (agent: string | null, model: string | null) => {
     if (!agent || !model) return model
@@ -72,6 +149,8 @@ export function TaskSidebar({ tasks, onTaskSelect, width = 288 }: TaskSidebarPro
         return () => <span className="text-lg">𝕏</span>
       case 'cursor':
         return Cursor
+      case 'gemini':
+        return Gemini
       case 'opencode':
         return OpenCode
       default:
@@ -79,18 +158,71 @@ export function TaskSidebar({ tasks, onTaskSelect, width = 288 }: TaskSidebarPro
     }
   }
 
+  // Show logged out state if no user is authenticated
+  if (!session.user) {
+    return (
+      <div
+        className="h-full border-r bg-muted px-2 md:px-3 pt-3 md:pt-5.5 pb-3 md:pb-4 overflow-y-auto flex flex-col"
+        style={{ width: `${width}px` }}
+      >
+        <div className="mb-3 md:mb-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm md:text-base font-semibold pl-3">Tasks</h2>
+            <div className="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 w-8 p-0"
+                onClick={() => setShowDeleteDialog(true)}
+                disabled={true}
+                title="Delete Tasks"
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+              <Link href="/" onClick={handleNewTaskClick}>
+                <Button variant="ghost" size="sm" className="h-8 w-8 p-0" title="New Task">
+                  <Plus className="h-4 w-4" />
+                </Button>
+              </Link>
+            </div>
+          </div>
+        </div>
+        <div className="space-y-1">
+          <Card>
+            <CardContent className="p-3 text-center text-xs text-muted-foreground">
+              Sign in to view and create tasks
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <div className="h-full border-r bg-muted p-3 overflow-y-auto" style={{ width: `${width}px` }}>
-      <div className="mb-3">
+    <div
+      className="h-full border-r bg-muted px-2 md:px-3 pt-3 md:pt-5.5 pb-3 md:pb-4 overflow-y-auto"
+      style={{ width: `${width}px` }}
+    >
+      <div className="mb-3 md:mb-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-base font-semibold">
-            {tasks.length} Task{tasks.length !== 1 ? 's' : ''}
-          </h2>
-          <Link href="/">
-            <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
-              <Plus className="h-4 w-4" />
+          <h2 className="text-sm md:text-base font-semibold pl-3">Tasks</h2>
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 w-8 p-0"
+              onClick={() => setShowDeleteDialog(true)}
+              disabled={isDeleting || tasks.length === 0}
+              title="Delete Tasks"
+            >
+              <Trash2 className="h-4 w-4" />
             </Button>
-          </Link>
+            <Link href="/" onClick={handleNewTaskClick}>
+              <Button variant="ghost" size="sm" className="h-8 w-8 p-0" title="New Task">
+                <Plus className="h-4 w-4" />
+              </Button>
+            </Link>
+          </div>
         </div>
       </div>
 
@@ -185,15 +317,69 @@ export function TaskSidebar({ tasks, onTaskSelect, width = 288 }: TaskSidebarPro
         )}
       </div>
 
-      {/* Settings Link */}
-      <div className="mt-auto pt-3 border-t">
-        <Link href="/settings">
-          <Button variant="ghost" size="sm" className="w-full justify-start">
-            <Settings className="h-4 w-4 mr-2" />
-            Settings
-          </Button>
-        </Link>
-      </div>
+      <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Tasks</AlertDialogTitle>
+            <AlertDialogDescription>
+              Select which types of tasks you want to delete. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="py-4">
+            <div className="space-y-4">
+              <div className="flex items-center space-x-2">
+                <Checkbox
+                  id="delete-completed"
+                  checked={deleteCompleted}
+                  onCheckedChange={(checked) => setDeleteCompleted(checked === true)}
+                />
+                <label
+                  htmlFor="delete-completed"
+                  className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                >
+                  Delete Completed Tasks
+                </label>
+              </div>
+              <div className="flex items-center space-x-2">
+                <Checkbox
+                  id="delete-failed"
+                  checked={deleteFailed}
+                  onCheckedChange={(checked) => setDeleteFailed(checked === true)}
+                />
+                <label
+                  htmlFor="delete-failed"
+                  className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                >
+                  Delete Failed Tasks
+                </label>
+              </div>
+              <div className="flex items-center space-x-2">
+                <Checkbox
+                  id="delete-stopped"
+                  checked={deleteStopped}
+                  onCheckedChange={(checked) => setDeleteStopped(checked === true)}
+                />
+                <label
+                  htmlFor="delete-stopped"
+                  className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                >
+                  Delete Stopped Tasks
+                </label>
+              </div>
+            </div>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDeleteTasks}
+              disabled={isDeleting || (!deleteCompleted && !deleteFailed && !deleteStopped)}
+              className="bg-red-600 hover:bg-red-700"
+            >
+              {isDeleting ? 'Deleting...' : 'Delete Tasks'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
