@@ -3,7 +3,7 @@
 import { Task } from '@/lib/db/schema'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { AlertCircle, Plus } from 'lucide-react'
+import { AlertCircle, Plus, Clock, Settings } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
@@ -12,30 +12,31 @@ import { Claude, Codex, Cursor, OpenCode } from '@/components/logos'
 // Model mappings for human-friendly names
 const AGENT_MODELS = {
   claude: [
-    { value: 'claude-sonnet-4-20250514', label: 'Sonnet 4' },
+    { value: 'claude-sonnet-4-5-20250514', label: 'Sonnet 4.5' },
     { value: 'claude-opus-4-1-20250805', label: 'Opus 4.1' },
   ],
   codex: [
     { value: 'openai/gpt-5', label: 'GPT-5' },
-    { value: 'gpt-5-codex', label: 'GPT-5-Codex' },
-    { value: 'openai/gpt-5-mini', label: 'GPT-5 Mini' },
-    { value: 'openai/gpt-5-nano', label: 'GPT-5 Nano' },
     { value: 'openai/gpt-4.1', label: 'GPT-4.1' },
+    { value: 'gpt-4o', label: 'GPT-4o' },
+  ],
+  grok: [
+    { value: 'grok-2-latest', label: 'Grok 2 Latest' },
+    { value: 'grok-2-vision-1212', label: 'Grok 2 Vision' },
+    { value: 'grok-beta', label: 'Grok Beta' },
   ],
   cursor: [
-    { value: 'gpt-5', label: 'GPT-5' },
-    { value: 'gpt-5-mini', label: 'GPT-5 Mini' },
-    { value: 'gpt-5-nano', label: 'GPT-5 Nano' },
-    { value: 'gpt-4.1', label: 'GPT-4.1' },
-    { value: 'claude-sonnet-4-20250514', label: 'Sonnet 4' },
+    { value: 'openai/gpt-5', label: 'GPT-5' },
+    { value: 'openai/gpt-4.1', label: 'GPT-4.1' },
+    { value: 'gpt-4o', label: 'GPT-4o' },
+    { value: 'claude-sonnet-4-5-20250514', label: 'Sonnet 4.5' },
     { value: 'claude-opus-4-1-20250805', label: 'Opus 4.1' },
   ],
   opencode: [
-    { value: 'gpt-5', label: 'GPT-5' },
-    { value: 'gpt-5-mini', label: 'GPT-5 Mini' },
-    { value: 'gpt-5-nano', label: 'GPT-5 Nano' },
-    { value: 'gpt-4.1', label: 'GPT-4.1' },
-    { value: 'claude-sonnet-4-20250514', label: 'Sonnet 4' },
+    { value: 'openai/gpt-5', label: 'GPT-5' },
+    { value: 'openai/gpt-4.1', label: 'GPT-4.1' },
+    { value: 'gpt-4o', label: 'GPT-4o' },
+    { value: 'claude-sonnet-4-5-20250514', label: 'Sonnet 4.5' },
     { value: 'claude-opus-4-1-20250805', label: 'Opus 4.1' },
   ],
 } as const
@@ -67,6 +68,8 @@ export function TaskSidebar({ tasks, onTaskSelect, width = 288 }: TaskSidebarPro
         return Claude
       case 'codex':
         return Codex
+      case 'grok':
+        return () => <span className="text-lg">𝕏</span>
       case 'cursor':
         return Cursor
       case 'opencode':
@@ -133,6 +136,12 @@ export function TaskSidebar({ tasks, onTaskSelect, width = 288 }: TaskSidebarPro
                           {task.status === 'stopped' && (
                             <AlertCircle className="h-3 w-3 text-orange-500 flex-shrink-0" />
                           )}
+                          {task.status === 'queued' && task.queuePosition && (
+                            <div className="flex items-center gap-0.5 text-xs text-muted-foreground flex-shrink-0">
+                              <Clock className="h-3 w-3" />
+                              <span>#{task.queuePosition}</span>
+                            </div>
+                          )}
                         </div>
                         {task.repoUrl && (
                           <div className="flex items-center gap-1 text-xs text-muted-foreground mb-0.5">
@@ -174,6 +183,16 @@ export function TaskSidebar({ tasks, onTaskSelect, width = 288 }: TaskSidebarPro
             )
           })
         )}
+      </div>
+
+      {/* Settings Link */}
+      <div className="mt-auto pt-3 border-t">
+        <Link href="/settings">
+          <Button variant="ghost" size="sm" className="w-full justify-start">
+            <Settings className="h-4 w-4 mr-2" />
+            Settings
+          </Button>
+        </Link>
       </div>
     </div>
   )

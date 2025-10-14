@@ -11,6 +11,7 @@ import { eq, desc, or } from 'drizzle-orm'
 import { createInfoLog } from '@/lib/utils/logging'
 import { createTaskLogger } from '@/lib/utils/task-logger'
 import { generateBranchName, createFallbackBranchName } from '@/lib/utils/branch-name-generator'
+import { shouldQueueTask, updateQueuePositions, processQueue } from '@/lib/queue/task-queue'
 
 export async function GET() {
   try {
@@ -28,10 +29,15 @@ export async function POST(request: NextRequest) {
 
     // Use provided ID or generate a new one
     const taskId = body.id || generateId(12)
+
+    // Check if we should queue this task
+    const { shouldQueue, queuePosition } = await shouldQueueTask()
+
     const validatedData = insertTaskSchema.parse({
       ...body,
       id: taskId,
-      status: 'pending',
+      status: shouldQueue ? 'queued' : 'pending',
+      queuePosition: shouldQueue ? queuePosition : null,
       progress: 0,
       logs: [],
     })
@@ -45,80 +51,90 @@ export async function POST(request: NextRequest) {
       })
       .returning()
 
-    // Generate AI branch name after response is sent (non-blocking)
-    after(async () => {
-      try {
-        // Check if AI Gateway API key is available
-        if (!process.env.AI_GATEWAY_API_KEY) {
-          console.log('AI_GATEWAY_API_KEY not available, skipping AI branch name generation')
-          return
-        }
+    // If task is queued, log it
+    if (shouldQueue) {
+      const logger = createTaskLogger(taskId)
+      await logger.info(`Task queued at position ${queuePosition}. Will start when a slot becomes available.`)
+    }
 
-        const logger = createTaskLogger(taskId)
-        await logger.info('Generating AI-powered branch name...')
-
-        // Extract repository name from URL for context
-        let repoName: string | undefined
+    // Generate AI branch name after response is sent (non-blocking) - only if repo is provided
+    if (validatedData.repoUrl && validatedData.repoUrl.trim() !== '') {
+      after(async () => {
         try {
-          const url = new URL(validatedData.repoUrl || '')
-          const pathParts = url.pathname.split('/')
-          if (pathParts.length >= 3) {
-            repoName = pathParts[pathParts.length - 1].replace('.git', '')
+          // Check if AI Gateway API key is available
+          if (!process.env.AI_GATEWAY_API_KEY) {
+            console.log('AI_GATEWAY_API_KEY not available, skipping AI branch name generation')
+            return
           }
-        } catch {
-          // Ignore URL parsing errors
-        }
 
-        // Generate AI branch name
-        const aiBranchName = await generateBranchName({
-          description: validatedData.prompt,
-          repoName,
-          context: `${validatedData.selectedAgent} agent task`,
-        })
+          const logger = createTaskLogger(taskId)
+          await logger.info('Generating AI-powered branch name...')
 
-        // Update task with AI-generated branch name
-        await db
-          .update(tasks)
-          .set({
-            branchName: aiBranchName,
-            updatedAt: new Date(),
+          // Extract repository name from URL for context
+          let repoName: string | undefined
+          try {
+            const url = new URL(validatedData.repoUrl || '')
+            const pathParts = url.pathname.split('/')
+            if (pathParts.length >= 3) {
+              repoName = pathParts[pathParts.length - 1].replace('.git', '')
+            }
+          } catch {
+            // Ignore URL parsing errors
+          }
+
+          // Generate AI branch name
+          const aiBranchName = await generateBranchName({
+            description: validatedData.prompt,
+            repoName,
+            context: `${validatedData.selectedAgent} agent task`,
           })
-          .where(eq(tasks.id, taskId))
 
-        await logger.success(`Generated AI branch name: ${aiBranchName}`)
-      } catch (error) {
-        console.error('Error generating AI branch name:', error)
-
-        // Fallback to timestamp-based branch name
-        const fallbackBranchName = createFallbackBranchName(taskId)
-
-        try {
+          // Update task with AI-generated branch name
           await db
             .update(tasks)
             .set({
-              branchName: fallbackBranchName,
+              branchName: aiBranchName,
               updatedAt: new Date(),
             })
             .where(eq(tasks.id, taskId))
 
-          const logger = createTaskLogger(taskId)
-          await logger.info(`Using fallback branch name: ${fallbackBranchName}`)
-        } catch (dbError) {
-          console.error('Error updating task with fallback branch name:', dbError)
-        }
-      }
-    })
+          await logger.success(`Generated AI branch name: ${aiBranchName}`)
+        } catch (error) {
+          console.error('Error generating AI branch name:', error)
 
-    // Process the task asynchronously with timeout
-    processTaskWithTimeout(
-      newTask.id,
-      validatedData.prompt,
-      validatedData.repoUrl || '',
-      validatedData.selectedAgent || 'claude',
-      validatedData.selectedModel,
-      validatedData.installDependencies || false,
-      validatedData.maxDuration || 5,
-    )
+          // Fallback to timestamp-based branch name
+          const fallbackBranchName = createFallbackBranchName(taskId)
+
+          try {
+            await db
+              .update(tasks)
+              .set({
+                branchName: fallbackBranchName,
+                updatedAt: new Date(),
+              })
+              .where(eq(tasks.id, taskId))
+
+            const logger = createTaskLogger(taskId)
+            await logger.info(`Using fallback branch name: ${fallbackBranchName}`)
+          } catch (dbError) {
+            console.error('Error updating task with fallback branch name:', dbError)
+          }
+        }
+      })
+    }
+
+    // Only process the task immediately if it's not queued
+    if (!shouldQueue) {
+      processTaskWithTimeout(
+        newTask.id,
+        validatedData.prompt,
+        validatedData.repoUrl || '',
+        validatedData.selectedAgent || 'claude',
+        validatedData.selectedModel,
+        validatedData.installDependencies || false,
+        validatedData.maxDuration || 5,
+      )
+    }
 
     return NextResponse.json({ task: newTask })
   } catch (error) {
@@ -241,19 +257,24 @@ async function processTask(
       return
     }
 
-    // Wait for AI-generated branch name (with timeout)
-    const aiBranchName = await waitForBranchName(taskId, 10000)
+    // Wait for AI-generated branch name (with timeout) - only if repo is provided
+    const hasRepo = repoUrl && repoUrl.trim() !== ''
+    let aiBranchName: string | null = null
 
-    // Check if task was stopped during branch name generation
-    if (await isTaskStopped(taskId)) {
-      await logger.info('Task was stopped during branch name generation')
-      return
-    }
+    if (hasRepo) {
+      aiBranchName = await waitForBranchName(taskId, 10000)
 
-    if (aiBranchName) {
-      await logger.info(`Using AI-generated branch name: ${aiBranchName}`)
-    } else {
-      await logger.info('AI branch name not ready, will use fallback during sandbox creation')
+      // Check if task was stopped during branch name generation
+      if (await isTaskStopped(taskId)) {
+        await logger.info('Task was stopped during branch name generation')
+        return
+      }
+
+      if (aiBranchName) {
+        await logger.info(`Using AI-generated branch name: ${aiBranchName}`)
+      } else {
+        await logger.info('AI branch name not ready, will use fallback during sandbox creation')
+      }
     }
 
     await logger.updateProgress(15, 'Creating sandbox environment...')
@@ -310,14 +331,14 @@ async function processTask(
     const { sandbox: createdSandbox, domain, branchName } = sandboxResult
     sandbox = createdSandbox || null
 
-    // Update sandbox URL and branch name (only update branch name if not already set by AI)
+    // Update sandbox URL and branch name (only update branch name if not already set by AI and if repo exists)
     const updateData: { sandboxUrl?: string; updatedAt: Date; branchName?: string } = {
       sandboxUrl: domain || undefined,
       updatedAt: new Date(),
     }
 
-    // Only update branch name if we don't already have an AI-generated one
-    if (!aiBranchName) {
+    // Only update branch name if we don't already have an AI-generated one and we have a repo
+    if (hasRepo && !aiBranchName && branchName) {
       updateData.branchName = branchName
     }
 
@@ -375,9 +396,30 @@ async function processTask(
       // Agent execution logs are already logged in real-time by the agent
       // No need to log them again here
 
-      // Push changes to branch
-      const commitMessage = `${prompt.substring(0, 50)}${prompt.length > 50 ? '...' : ''}`
-      const pushResult = await pushChangesToBranch(sandbox!, branchName!, commitMessage, logger)
+      // Push changes to branch (only if repo was provided)
+      const hasRepo = repoUrl && repoUrl.trim() !== ''
+      if (hasRepo && branchName) {
+        const commitMessage = `${prompt.substring(0, 50)}${prompt.length > 50 ? '...' : ''}`
+        const pushResult = await pushChangesToBranch(sandbox!, branchName, commitMessage, logger)
+
+        // Check if push failed and handle accordingly
+        if (pushResult.pushFailed) {
+          // Unregister and shutdown sandbox
+          unregisterSandbox(taskId)
+          const shutdownResult = await shutdownSandbox(sandbox!)
+          if (shutdownResult.success) {
+            await logger.success('Sandbox shutdown completed')
+          } else {
+            await logger.error(`Sandbox shutdown failed: ${shutdownResult.error}`)
+          }
+
+          await logger.updateStatus('error')
+          await logger.error('Task failed: Unable to push changes to repository')
+          throw new Error('Failed to push changes to repository')
+        }
+      } else {
+        await logger.info('No repository specified - skipping git operations')
+      }
 
       // Unregister and shutdown sandbox
       unregisterSandbox(taskId)
@@ -388,16 +430,9 @@ async function processTask(
         await logger.error(`Sandbox shutdown failed: ${shutdownResult.error}`)
       }
 
-      // Check if push failed and handle accordingly
-      if (pushResult.pushFailed) {
-        await logger.updateStatus('error')
-        await logger.error('Task failed: Unable to push changes to repository')
-        throw new Error('Failed to push changes to repository')
-      } else {
-        // Update task as completed
-        await logger.updateStatus('completed')
-        await logger.updateProgress(100, 'Task completed successfully')
-      }
+      // Update task as completed
+      await logger.updateStatus('completed')
+      await logger.updateProgress(100, 'Task completed successfully')
     } else {
       // Agent failed, but we still want to capture its logs
       await logger.error(`${selectedAgent} agent execution failed`)
@@ -431,6 +466,13 @@ async function processTask(
     // Log the error and update task status
     await logger.error(`Error: ${errorMessage}`)
     await logger.updateStatus('error', errorMessage)
+  } finally {
+    // Process queue after task completes (success or failure)
+    try {
+      await processQueue()
+    } catch (queueError) {
+      console.error('Error processing queue after task completion:', queueError)
+    }
   }
 }
 

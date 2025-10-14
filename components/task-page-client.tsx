@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button'
 import { MoreHorizontal } from 'lucide-react'
 import { useTasks } from '@/components/app-layout'
 import { VERCEL_DEPLOY_URL } from '@/lib/constants'
+import { TaskImages } from '@/components/task-images'
 
 interface TaskPageClientProps {
   taskId: string
@@ -96,8 +97,9 @@ export function TaskPageClient({ taskId }: TaskPageClientProps) {
         <TaskPageHeader task={task} />
 
         {/* Task details */}
-        <div className="max-w-4xl mx-auto">
+        <div className="max-w-4xl mx-auto space-y-6">
           <TaskDetails task={task} />
+          <TaskImages taskId={task.id} />
         </div>
       </div>
     </div>

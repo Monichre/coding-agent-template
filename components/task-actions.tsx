@@ -15,7 +15,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import { MoreHorizontal, RotateCcw, Trash2, ExternalLink } from 'lucide-react'
+import { MoreHorizontal, RotateCcw, Trash2, ExternalLink, MessageSquareCode } from 'lucide-react'
 import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 import { VERCEL_DEPLOY_URL } from '@/lib/constants'
@@ -77,6 +77,7 @@ export function TaskActions({ task }: TaskActionsProps) {
   const [showTryAgainDialog, setShowTryAgainDialog] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
   const [isTryingAgain, setIsTryingAgain] = useState(false)
+  const [isReviewing, setIsReviewing] = useState(false)
   const [selectedAgent, setSelectedAgent] = useState(task.selectedAgent || 'claude')
   const [selectedModel, setSelectedModel] = useState<string>(task.selectedModel || DEFAULT_MODELS.claude)
   const router = useRouter()
@@ -163,6 +164,40 @@ export function TaskActions({ task }: TaskActionsProps) {
     }
   }
 
+  const handleCodeReview = async () => {
+    if (!task.branchName || task.status !== 'completed') {
+      toast.error('Code review is only available for completed tasks with a branch')
+      return
+    }
+
+    setIsReviewing(true)
+    try {
+      const response = await fetch('/api/code-review', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ taskId: task.id }),
+      })
+
+      if (response.ok) {
+        const result = await response.json()
+        toast.success('Code review posted successfully!')
+        if (result.prUrl) {
+          window.open(result.prUrl, '_blank', 'noopener,noreferrer')
+        }
+      } else {
+        const error = await response.json()
+        toast.error(error.error || 'Failed to perform code review')
+      }
+    } catch (error) {
+      console.error('Error performing code review:', error)
+      toast.error('Failed to perform code review')
+    } finally {
+      setIsReviewing(false)
+    }
+  }
+
   return (
     <>
       <div className="flex items-center gap-2">
@@ -193,6 +228,12 @@ export function TaskActions({ task }: TaskActionsProps) {
               <DropdownMenuItem onClick={handleOpenPR}>
                 <ExternalLink className="h-4 w-4 mr-2" />
                 Open PR
+              </DropdownMenuItem>
+            )}
+            {task.status === 'completed' && task.branchName && (
+              <DropdownMenuItem onClick={handleCodeReview} disabled={isReviewing}>
+                <MessageSquareCode className="h-4 w-4 mr-2" />
+                {isReviewing ? 'Reviewing...' : 'AI Code Review'}
               </DropdownMenuItem>
             )}
             <DropdownMenuItem onClick={() => setShowTryAgainDialog(true)}>

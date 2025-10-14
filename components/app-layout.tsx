@@ -26,6 +26,7 @@ interface TasksContextType {
     selectedAgent: string
     selectedModel: string
   }) => { id: string; optimisticTask: Task }
+  removeTaskOptimistically: (taskId: string) => void
 }
 
 const TasksContext = createContext<TasksContextType | undefined>(undefined)
@@ -198,6 +199,8 @@ export function AppLayout({ children, initialSidebarWidth, initialSidebarOpen }:
       repoUrl: taskData.repoUrl,
       selectedAgent: taskData.selectedAgent,
       selectedModel: taskData.selectedModel,
+      installDependencies: null,
+      maxDuration: null,
       status: 'pending',
       progress: 0,
       logs: [],
@@ -213,6 +216,10 @@ export function AppLayout({ children, initialSidebarWidth, initialSidebarOpen }:
     setTasks((prevTasks) => [optimisticTask, ...prevTasks])
 
     return { id, optimisticTask }
+  }
+
+  const removeTaskOptimistically = (taskId: string) => {
+    setTasks((prevTasks) => prevTasks.filter((task) => task.id !== taskId))
   }
 
   const closeSidebar = () => {
@@ -257,7 +264,15 @@ export function AppLayout({ children, initialSidebarWidth, initialSidebarOpen }:
   }, [isResizing])
 
   return (
-    <TasksContext.Provider value={{ refreshTasks: fetchTasks, toggleSidebar, isSidebarOpen, addTaskOptimistically }}>
+    <TasksContext.Provider
+      value={{
+        refreshTasks: fetchTasks,
+        toggleSidebar,
+        isSidebarOpen,
+        addTaskOptimistically,
+        removeTaskOptimistically,
+      }}
+    >
       <div
         className="h-screen flex relative"
         style={

@@ -25,7 +25,7 @@ export function HomePageContent({
   const [selectedOwner, setSelectedOwnerState] = useState(initialSelectedOwner)
   const [selectedRepo, setSelectedRepoState] = useState(initialSelectedRepo)
   const router = useRouter()
-  const { refreshTasks, addTaskOptimistically } = useTasks()
+  const { refreshTasks, addTaskOptimistically, removeTaskOptimistically } = useTasks()
 
   // No longer need the useEffect for loading cookies - they come from server
 
@@ -77,14 +77,18 @@ export function HomePageContent({
       } else {
         const error = await response.json()
         toast.error(error.error || 'Failed to create task')
-        // TODO: Remove the optimistic task on error
-        await refreshTasks() // For now, just refresh to remove the optimistic task
+        // Remove the optimistic task on error
+        removeTaskOptimistically(id)
+        // Navigate back to home if we're on the failed task page
+        router.push('/')
       }
     } catch (error) {
       console.error('Error creating task:', error)
       toast.error('Failed to create task')
-      // TODO: Remove the optimistic task on error
-      await refreshTasks() // For now, just refresh to remove the optimistic task
+      // Remove the optimistic task on error
+      removeTaskOptimistically(id)
+      // Navigate back to home if we're on the failed task page
+      router.push('/')
     } finally {
       setIsSubmitting(false)
     }

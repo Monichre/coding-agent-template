@@ -3,7 +3,7 @@ import { LogEntry } from '@/lib/db/schema'
 
 export interface SandboxConfig {
   taskId: string
-  repoUrl: string
+  repoUrl?: string
   timeout?: string
   ports?: number[]
   runtime?: string

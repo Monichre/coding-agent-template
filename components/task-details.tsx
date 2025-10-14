@@ -153,6 +153,8 @@ export function TaskDetails({ task }: TaskDetailsProps) {
     switch (status) {
       case 'pending':
         return <Clock className="h-4 w-4" />
+      case 'queued':
+        return <Clock className="h-4 w-4" />
       case 'processing':
         return <Loader2 className="h-4 w-4 animate-spin" />
       case 'completed':
@@ -170,6 +172,8 @@ export function TaskDetails({ task }: TaskDetailsProps) {
     switch (status) {
       case 'pending':
         return 'Waiting to start'
+      case 'queued':
+        return task.queuePosition ? `Queued (Position #${task.queuePosition})` : 'Queued'
       case 'processing':
         return 'In progress'
       case 'completed':
@@ -187,6 +191,8 @@ export function TaskDetails({ task }: TaskDetailsProps) {
     switch (status) {
       case 'pending':
         return 'text-gray-500'
+      case 'queued':
+        return 'text-yellow-500'
       case 'processing':
         return 'text-blue-500'
       case 'completed':

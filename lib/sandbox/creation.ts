@@ -32,7 +32,13 @@ async function runAndLogCommand(sandbox: Sandbox, command: string, args: string[
 
 export async function createSandbox(config: SandboxConfig, logger: TaskLogger): Promise<SandboxResult> {
   try {
-    await logger.info(`Repository URL: ${redactSensitiveInfo(config.repoUrl)}`)
+    const hasRepo = config.repoUrl && config.repoUrl.trim() !== ''
+
+    if (hasRepo) {
+      await logger.info(`Repository URL: ${redactSensitiveInfo(config.repoUrl!)}`)
+    } else {
+      await logger.info('No repository specified - creating blank sandbox')
+    }
 
     // Check for cancellation before starting
     if (config.onCancellationCheck && (await config.onCancellationCheck())) {
@@ -52,29 +58,38 @@ export async function createSandbox(config: SandboxConfig, logger: TaskLogger): 
     }
     await logger.info('Environment variables validated')
 
-    // Handle private repository authentication
-    const authenticatedRepoUrl = createAuthenticatedRepoUrl(config.repoUrl)
-    await logger.info('Added GitHub authentication to repository URL')
+    let authenticatedRepoUrl: string | undefined
+    let branchNameForEnv: string | undefined
 
-    // For initial clone, only use existing branch names, not AI-generated ones
-    // AI-generated branch names will be created later inside the sandbox
-    const branchNameForEnv = config.existingBranchName
+    if (hasRepo) {
+      // Handle private repository authentication
+      authenticatedRepoUrl = createAuthenticatedRepoUrl(config.repoUrl!)
+      await logger.info('Added GitHub authentication to repository URL')
+
+      // For initial clone, only use existing branch names, not AI-generated ones
+      // AI-generated branch names will be created later inside the sandbox
+      branchNameForEnv = config.existingBranchName
+    }
 
     // Create sandbox with proper source configuration
-    const sandboxConfig = {
+    const sandboxConfig: any = {
       teamId: process.env.VERCEL_TEAM_ID!,
       projectId: process.env.VERCEL_PROJECT_ID!,
       token: process.env.VERCEL_TOKEN!,
-      source: {
-        type: 'git' as const,
-        url: authenticatedRepoUrl,
-        revision: branchNameForEnv || 'main',
-        depth: 1, // Shallow clone for faster setup
-      },
       timeout: config.timeout ? parseInt(config.timeout.replace(/\D/g, '')) * 60 * 1000 : 5 * 60 * 1000, // Convert to milliseconds
       ports: config.ports || [3000],
       runtime: config.runtime || 'node22',
       resources: { vcpus: config.resources?.vcpus || 4 },
+    }
+
+    // Only add source config if we have a repo
+    if (hasRepo && authenticatedRepoUrl) {
+      sandboxConfig.source = {
+        type: 'git' as const,
+        url: authenticatedRepoUrl,
+        revision: branchNameForEnv || 'main',
+        depth: 1, // Shallow clone for faster setup
+      }
     }
 
     await logger.info(

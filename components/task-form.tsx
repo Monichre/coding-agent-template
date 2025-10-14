@@ -15,9 +15,11 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
-import { Loader2, ArrowUp, Settings, X } from 'lucide-react'
+import { Loader2, ArrowUp, Settings, X, FileText } from 'lucide-react'
 import { Claude, Codex, Cursor, OpenCode } from '@/components/logos'
 import { getInstallDependencies, setInstallDependencies, getMaxDuration, setMaxDuration } from '@/lib/utils/cookies'
+import type { Template } from '@/lib/db/schema'
+import { ImageGenerator } from '@/components/image-generator'
 
 interface GitHubRepo {
   name: string
@@ -47,6 +49,7 @@ interface TaskFormProps {
 const CODING_AGENTS = [
   { value: 'claude', label: 'Claude', icon: Claude },
   { value: 'codex', label: 'Codex', icon: Codex },
+  { value: 'grok', label: 'Grok', icon: () => <span className="text-lg">𝕏</span> },
   { value: 'cursor', label: 'Cursor', icon: Cursor },
   { value: 'opencode', label: 'opencode', icon: OpenCode },
 ] as const
@@ -54,41 +57,43 @@ const CODING_AGENTS = [
 // Model options for each agent
 const AGENT_MODELS = {
   claude: [
-    { value: 'claude-sonnet-4-20250514', label: 'Sonnet 4' },
+    { value: 'claude-sonnet-4-5-20250514', label: 'Sonnet 4.5' },
     { value: 'claude-opus-4-1-20250805', label: 'Opus 4.1' },
   ],
   codex: [
     { value: 'openai/gpt-5', label: 'GPT-5' },
-    { value: 'gpt-5-codex', label: 'GPT-5-Codex' },
-    { value: 'openai/gpt-5-mini', label: 'GPT-5 Mini' },
-    { value: 'openai/gpt-5-nano', label: 'GPT-5 Nano' },
     { value: 'openai/gpt-4.1', label: 'GPT-4.1' },
+    { value: 'gpt-4o', label: 'GPT-4o' },
+  ],
+  grok: [
+    { value: 'grok-2-latest', label: 'Grok 2 Latest' },
+    { value: 'grok-2-vision-1212', label: 'Grok 2 Vision' },
+    { value: 'grok-beta', label: 'Grok Beta' },
   ],
   cursor: [
     { value: 'auto', label: 'Auto' },
-    { value: 'gpt-5', label: 'GPT-5' },
-    { value: 'gpt-5-mini', label: 'GPT-5 Mini' },
-    { value: 'gpt-5-nano', label: 'GPT-5 Nano' },
-    { value: 'gpt-4.1', label: 'GPT-4.1' },
-    { value: 'claude-sonnet-4-20250514', label: 'Sonnet 4' },
+    { value: 'openai/gpt-5', label: 'GPT-5' },
+    { value: 'openai/gpt-4.1', label: 'GPT-4.1' },
+    { value: 'gpt-4o', label: 'GPT-4o' },
+    { value: 'claude-sonnet-4-5-20250514', label: 'Sonnet 4.5' },
     { value: 'claude-opus-4-1-20250805', label: 'Opus 4.1' },
   ],
   opencode: [
-    { value: 'gpt-5', label: 'GPT-5' },
-    { value: 'gpt-5-mini', label: 'GPT-5 Mini' },
-    { value: 'gpt-5-nano', label: 'GPT-5 Nano' },
-    { value: 'gpt-4.1', label: 'GPT-4.1' },
-    { value: 'claude-sonnet-4-20250514', label: 'Sonnet 4' },
+    { value: 'openai/gpt-5', label: 'GPT-5' },
+    { value: 'openai/gpt-4.1', label: 'GPT-4.1' },
+    { value: 'gpt-4o', label: 'GPT-4o' },
+    { value: 'claude-sonnet-4-5-20250514', label: 'Sonnet 4.5' },
     { value: 'claude-opus-4-1-20250805', label: 'Opus 4.1' },
   ],
 } as const
 
 // Default models for each agent
 const DEFAULT_MODELS = {
-  claude: 'claude-sonnet-4-20250514',
+  claude: 'claude-sonnet-4-5-20250514',
   codex: 'openai/gpt-5',
+  grok: 'grok-2-latest',
   cursor: 'auto',
-  opencode: 'gpt-5',
+  opencode: 'openai/gpt-5',
 } as const
 
 export function TaskForm({
@@ -104,6 +109,15 @@ export function TaskForm({
   const [selectedModel, setSelectedModel] = useState<string>(DEFAULT_MODELS.claude)
   const [repos, setRepos] = useState<GitHubRepo[]>([])
   const [loadingRepos, setLoadingRepos] = useState(false)
+
+  // Template state
+  const [templates, setTemplates] = useState<Template[]>([])
+  const [loadingTemplates, setLoadingTemplates] = useState(false)
+  const [showTemplatesDialog, setShowTemplatesDialog] = useState(false)
+
+  // Custom agents state
+  const [customAgents, setCustomAgents] = useState<any[]>([])
+  const [loadingAgents, setLoadingAgents] = useState(false)
 
   // Options state - initialize with server values
   const [installDependencies, setInstallDependenciesState] = useState(initialInstallDependencies)
@@ -124,6 +138,56 @@ export function TaskForm({
     setMaxDuration(value)
   }
 
+  // Fetch templates
+  const fetchTemplates = async () => {
+    setLoadingTemplates(true)
+    try {
+      const response = await fetch('/api/templates')
+      if (response.ok) {
+        const data = await response.json()
+        setTemplates(data.templates)
+      }
+    } catch (error) {
+      console.error('Error fetching templates:', error)
+    } finally {
+      setLoadingTemplates(false)
+    }
+  }
+
+  // Fetch custom agents
+  const fetchCustomAgents = async () => {
+    setLoadingAgents(true)
+    try {
+      const response = await fetch('/api/custom-agents')
+      if (response.ok) {
+        const data = await response.json()
+        // Only include active agents
+        setCustomAgents(data.agents.filter((a: any) => a.isActive))
+      }
+    } catch (error) {
+      console.error('Error fetching custom agents:', error)
+    } finally {
+      setLoadingAgents(false)
+    }
+  }
+
+  // Load custom agents on mount
+  useEffect(() => {
+    fetchCustomAgents()
+  }, [])
+
+  // Apply template to prompt
+  const applyTemplate = (template: Template) => {
+    setPrompt(template.prompt)
+    setShowTemplatesDialog(false)
+    // Focus textarea after applying template
+    setTimeout(() => {
+      if (textareaRef.current) {
+        textareaRef.current.focus()
+      }
+    }, 100)
+  }
+
   // Handle keyboard events in textarea
   const handleTextareaKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter') {
@@ -132,7 +196,7 @@ export function TaskForm({
       const isMobile = window.innerWidth < 768
       if (!isMobile && !e.shiftKey) {
         e.preventDefault()
-        if (prompt.trim() && selectedOwner && selectedRepo) {
+        if (prompt.trim()) {
           // Find the form and submit it
           const form = e.currentTarget.closest('form')
           if (form) {
@@ -248,21 +312,20 @@ export function TaskForm({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    if (prompt.trim() && selectedOwner && selectedRepo) {
+    if (prompt.trim()) {
       const selectedRepoData = repos.find((repo) => repo.name === selectedRepo)
-      if (selectedRepoData) {
-        // Clear the saved prompt since we're submitting it
-        localStorage.removeItem('task-prompt')
 
-        onSubmit({
-          prompt: prompt.trim(),
-          repoUrl: selectedRepoData.clone_url,
-          selectedAgent,
-          selectedModel,
-          installDependencies,
-          maxDuration,
-        })
-      }
+      // Clear the saved prompt since we're submitting it
+      localStorage.removeItem('task-prompt')
+
+      onSubmit({
+        prompt: prompt.trim(),
+        repoUrl: selectedRepoData?.clone_url || '',
+        selectedAgent,
+        selectedModel,
+        installDependencies,
+        maxDuration,
+      })
     }
   }
 
@@ -299,7 +362,7 @@ export function TaskForm({
             <Textarea
               ref={textareaRef}
               id="prompt"
-              placeholder="Describe what you want the AI agent to do..."
+              placeholder="Describe what you want the AI agent to do... (GitHub repo is optional)"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleTextareaKeyDown}
@@ -336,6 +399,19 @@ export function TaskForm({
                         </div>
                       </SelectItem>
                     ))}
+                    {customAgents.length > 0 && (
+                      <>
+                        <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">Custom Agents</div>
+                        {customAgents.map((agent) => (
+                          <SelectItem key={agent.id} value={agent.id}>
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm">{agent.icon || '🤖'}</span>
+                              <span>{agent.name}</span>
+                            </div>
+                          </SelectItem>
+                        ))}
+                      </>
+                    )}
                   </SelectContent>
                 </Select>
 
@@ -410,9 +486,81 @@ export function TaskForm({
 
               {/* Options and Submit Buttons */}
               <div className="flex items-center gap-2">
+                {/* Template Dialog */}
+                <Dialog
+                  open={showTemplatesDialog}
+                  onOpenChange={(open) => {
+                    setShowTemplatesDialog(open)
+                    if (open && templates.length === 0) {
+                      fetchTemplates()
+                    }
+                  }}
+                >
+                  <DialogTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="rounded-full h-8 w-8 p-0"
+                      title="Use template"
+                    >
+                      <FileText className="h-4 w-4" />
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+                    <DialogHeader>
+                      <DialogTitle>Task Templates</DialogTitle>
+                      <DialogDescription>Select a template to quickly start a common task</DialogDescription>
+                    </DialogHeader>
+                    {loadingTemplates ? (
+                      <div className="flex items-center justify-center py-8">
+                        <Loader2 className="h-6 w-6 animate-spin" />
+                      </div>
+                    ) : (
+                      <div className="space-y-4 py-4">
+                        {Object.entries(
+                          templates.reduce(
+                            (acc, template) => {
+                              if (!acc[template.category]) {
+                                acc[template.category] = []
+                              }
+                              acc[template.category].push(template)
+                              return acc
+                            },
+                            {} as Record<string, Template[]>,
+                          ),
+                        ).map(([category, categoryTemplates]) => (
+                          <div key={category} className="space-y-2">
+                            <h3 className="font-semibold capitalize text-sm text-muted-foreground">{category}</h3>
+                            <div className="grid gap-2">
+                              {categoryTemplates.map((template) => (
+                                <button
+                                  key={template.id}
+                                  type="button"
+                                  onClick={() => applyTemplate(template)}
+                                  className="text-left p-3 border rounded-lg hover:bg-accent transition-colors"
+                                >
+                                  <div className="font-medium text-sm">{template.name}</div>
+                                  <div className="text-xs text-muted-foreground mt-1">{template.description}</div>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </DialogContent>
+                </Dialog>
+
                 <Dialog open={showOptionsDialog} onOpenChange={setShowOptionsDialog}>
                   <DialogTrigger asChild>
-                    <Button type="button" variant="ghost" size="sm" className="rounded-full h-8 w-8 p-0">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="rounded-full h-8 w-8 p-0"
+                      title="Task options"
+                    >
                       <Settings className="h-4 w-4" />
                     </Button>
                   </DialogTrigger>
@@ -463,7 +611,7 @@ export function TaskForm({
 
                 <Button
                   type="submit"
-                  disabled={isSubmitting || !prompt.trim() || !selectedOwner || !selectedRepo}
+                  disabled={isSubmitting || !prompt.trim()}
                   size="sm"
                   className="rounded-full h-8 w-8 p-0"
                 >
@@ -474,6 +622,11 @@ export function TaskForm({
           </div>
         </div>
       </form>
+
+      {/* Additional Tools */}
+      <div className="mt-4 flex justify-center">
+        <ImageGenerator />
+      </div>
     </div>
   )
 }

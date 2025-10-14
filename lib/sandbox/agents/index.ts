@@ -2,11 +2,13 @@ import { Sandbox } from '@vercel/sandbox'
 import { AgentExecutionResult } from '../types'
 import { executeClaudeInSandbox } from './claude'
 import { executeCodexInSandbox } from './codex'
+import { executeGrokInSandbox } from './grok'
 import { executeCursorInSandbox } from './cursor'
 import { executeOpenCodeInSandbox } from './opencode'
+import { executeCustomAgentInSandbox } from './custom'
 import { TaskLogger } from '@/lib/utils/task-logger'
 
-export type AgentType = 'claude' | 'codex' | 'cursor' | 'opencode'
+export type AgentType = 'claude' | 'codex' | 'grok' | 'cursor' | 'opencode' | string // Allow custom agent IDs
 
 // Re-export types
 export type { AgentExecutionResult } from '../types'
@@ -30,12 +32,17 @@ export async function executeAgentInSandbox(
       changesDetected: false,
     }
   }
+
+  // Handle built-in agents
   switch (agentType) {
     case 'claude':
       return executeClaudeInSandbox(sandbox, instruction, logger, selectedModel)
 
     case 'codex':
       return executeCodexInSandbox(sandbox, instruction, logger, selectedModel)
+
+    case 'grok':
+      return executeGrokInSandbox(sandbox, instruction, logger, selectedModel)
 
     case 'cursor':
       return executeCursorInSandbox(sandbox, instruction, logger, selectedModel)
@@ -44,11 +51,7 @@ export async function executeAgentInSandbox(
       return executeOpenCodeInSandbox(sandbox, instruction, logger, selectedModel)
 
     default:
-      return {
-        success: false,
-        error: `Unknown agent type: ${agentType}`,
-        cliName: agentType,
-        changesDetected: false,
-      }
+      // Assume it's a custom agent ID
+      return executeCustomAgentInSandbox(sandbox, instruction, agentType, logger, selectedModel)
   }
 }
