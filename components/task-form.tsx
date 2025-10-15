@@ -18,12 +18,10 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Loader2, ArrowUp, Settings, X, Cable, Key } from 'lucide-react'
 import { Claude, Codex, Cursor, Gemini, OpenCode } from '@/components/logos'
-import { setInstallDependencies, setMaxDuration } from '@/lib/utils/cookies'
-import type { Template } from '@/lib/db/schema'
+import { setInstallDependencies, setMaxDuration, setKeepAlive } from '@/lib/utils/cookies'
 import { useConnectors } from '@/components/connectors-provider'
 import { ConnectorDialog } from '@/components/connectors/manage-connectors'
 import { ApiKeysDialog } from '@/components/api-keys-dialog'
-import { ImageGenerator } from '@/components/image-generator'
 import { toast } from 'sonner'
 
 interface GitHubRepo {
@@ -43,18 +41,20 @@ interface TaskFormProps {
     selectedModel: string
     installDependencies: boolean
     maxDuration: number
+    keepAlive: boolean
   }) => void
   isSubmitting: boolean
   selectedOwner: string
   selectedRepo: string
   initialInstallDependencies?: boolean
   initialMaxDuration?: number
+  initialKeepAlive?: boolean
+  maxSandboxDuration?: number
 }
 
 const CODING_AGENTS = [
   { value: 'claude', label: 'Claude', icon: Claude },
   { value: 'codex', label: 'Codex', icon: Codex },
-  { value: 'grok', label: 'Grok', icon: () => <span className="text-lg">𝕏</span> },
   { value: 'cursor', label: 'Cursor', icon: Cursor },
   { value: 'gemini', label: 'Gemini', icon: Gemini },
   { value: 'opencode', label: 'opencode', icon: OpenCode },
@@ -74,15 +74,8 @@ const AGENT_MODELS = {
     { value: 'openai/gpt-5-nano', label: 'GPT-5 nano' },
     { value: 'gpt-5-pro', label: 'GPT-5 pro' },
     { value: 'openai/gpt-4.1', label: 'GPT-4.1' },
-    { value: 'gpt-4o', label: 'GPT-4o' },
-  ],
-  grok: [
-    { value: 'grok-2-latest', label: 'Grok 2 Latest' },
-    { value: 'grok-2-vision-1212', label: 'Grok 2 Vision' },
-    { value: 'grok-beta', label: 'Grok Beta' },
   ],
   cursor: [
-    { value: 'auto', label: 'Auto' },
     { value: 'auto', label: 'Auto' },
     { value: 'sonnet-4.5', label: 'Sonnet 4.5' },
     { value: 'sonnet-4.5-thinking', label: 'Sonnet 4.5 Thinking' },
@@ -110,7 +103,6 @@ const AGENT_MODELS = {
 const DEFAULT_MODELS = {
   claude: 'claude-sonnet-4-5-20250929',
   codex: 'openai/gpt-5',
-  grok: 'grok-2-latest',
   cursor: 'auto',
   gemini: 'gemini-2.5-pro',
   opencode: 'gpt-5',
@@ -148,6 +140,8 @@ export function TaskForm({
   selectedRepo,
   initialInstallDependencies = false,
   initialMaxDuration = 5,
+  initialKeepAlive = false,
+  maxSandboxDuration = 5,
 }: TaskFormProps) {
   const [prompt, setPrompt] = useState('')
   const [selectedAgent, setSelectedAgent] = useState('claude')
@@ -155,18 +149,10 @@ export function TaskForm({
   const [repos, setRepos] = useState<GitHubRepo[]>([])
   const [, setLoadingRepos] = useState(false)
 
-  // Template state
-  const [templates, setTemplates] = useState<Template[]>([])
-  const [loadingTemplates, setLoadingTemplates] = useState(false)
-  const [showTemplatesDialog, setShowTemplatesDialog] = useState(false)
-
-  // Custom agents state
-  const [customAgents, setCustomAgents] = useState<any[]>([])
-  const [loadingAgents, setLoadingAgents] = useState(false)
-
   // Options state - initialize with server values
   const [installDependencies, setInstallDependenciesState] = useState(initialInstallDependencies)
   const [maxDuration, setMaxDurationState] = useState(initialMaxDuration)
+  const [keepAlive, setKeepAliveState] = useState(initialKeepAlive)
   const [showOptionsDialog, setShowOptionsDialog] = useState(false)
   const [showMcpServersDialog, setShowMcpServersDialog] = useState(false)
   const [showApiKeysDialog, setShowApiKeysDialog] = useState(false)
@@ -191,54 +177,9 @@ export function TaskForm({
     setMaxDuration(value)
   }
 
-  // Fetch templates
-  const fetchTemplates = async () => {
-    setLoadingTemplates(true)
-    try {
-      const response = await fetch('/api/templates')
-      if (response.ok) {
-        const data = await response.json()
-        setTemplates(data.templates)
-      }
-    } catch (error) {
-      console.error('Error fetching templates:', error)
-    } finally {
-      setLoadingTemplates(false)
-    }
-  }
-
-  // Fetch custom agents
-  const fetchCustomAgents = async () => {
-    setLoadingAgents(true)
-    try {
-      const response = await fetch('/api/custom-agents')
-      if (response.ok) {
-        const data = await response.json()
-        // Only include active agents
-        setCustomAgents(data.agents.filter((a: any) => a.isActive))
-      }
-    } catch (error) {
-      console.error('Error fetching custom agents:', error)
-    } finally {
-      setLoadingAgents(false)
-    }
-  }
-
-  // Load custom agents on mount
-  useEffect(() => {
-    fetchCustomAgents()
-  }, [])
-
-  // Apply template to prompt
-  const applyTemplate = (template: Template) => {
-    setPrompt(template.prompt)
-    setShowTemplatesDialog(false)
-    // Focus textarea after applying template
-    setTimeout(() => {
-      if (textareaRef.current) {
-        textareaRef.current.focus()
-      }
-    }, 100)
+  const updateKeepAlive = (value: boolean) => {
+    setKeepAliveState(value)
+    setKeepAlive(value)
   }
 
   // Handle keyboard events in textarea
@@ -246,10 +187,10 @@ export function TaskForm({
     if (e.key === 'Enter') {
       // On desktop: Enter submits, Shift+Enter creates new line
       // On mobile: Enter creates new line, must use submit button
-      const isMobile = window.innerWidth < 768
+      const isMobile = typeof window !== 'undefined' && window.innerWidth < 768
       if (!isMobile && !e.shiftKey) {
         e.preventDefault()
-        if (prompt.trim()) {
+        if (prompt.trim() && selectedOwner && selectedRepo) {
           // Find the form and submit it
           const form = e.currentTarget.closest('form')
           if (form) {
@@ -385,7 +326,7 @@ export function TaskForm({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (prompt.trim()) {
+    if (prompt.trim() && selectedOwner && selectedRepo) {
       // Check if API key is required and available for the selected agent and model
       try {
         const response = await fetch(`/api/api-keys/check?agent=${selectedAgent}&model=${selectedModel}`)
@@ -418,18 +359,20 @@ export function TaskForm({
       }
 
       const selectedRepoData = repos.find((repo) => repo.name === selectedRepo)
+      if (selectedRepoData) {
+        // Clear the saved prompt since we're submitting it
+        localStorage.removeItem('task-prompt')
 
-      // Clear the saved prompt since we're submitting it
-      localStorage.removeItem('task-prompt')
-
-      onSubmit({
-        prompt: prompt.trim(),
-        repoUrl: selectedRepoData?.clone_url || '',
-        selectedAgent,
-        selectedModel,
-        installDependencies,
-        maxDuration,
-      })
+        onSubmit({
+          prompt: prompt.trim(),
+          repoUrl: selectedRepoData.clone_url,
+          selectedAgent,
+          selectedModel,
+          installDependencies,
+          maxDuration,
+          keepAlive,
+        })
+      }
     }
   }
 
@@ -466,7 +409,7 @@ export function TaskForm({
             <Textarea
               ref={textareaRef}
               id="prompt"
-              placeholder="Describe what you want the AI agent to do... (GitHub repo is optional)"
+              placeholder="Describe what you want the AI agent to do..."
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleTextareaKeyDown}
@@ -503,19 +446,6 @@ export function TaskForm({
                         </div>
                       </SelectItem>
                     ))}
-                    {customAgents.length > 0 && (
-                      <>
-                        <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">Custom Agents</div>
-                        {customAgents.map((agent) => (
-                          <SelectItem key={agent.id} value={agent.id}>
-                            <div className="flex items-center gap-2">
-                              <span className="text-sm">{agent.icon || '🤖'}</span>
-                              <span>{agent.name}</span>
-                            </div>
-                          </SelectItem>
-                        ))}
-                      </>
-                    )}
                   </SelectContent>
                 </Select>
 
@@ -542,7 +472,7 @@ export function TaskForm({
                 </Select>
 
                 {/* Option Chips - Only visible on desktop */}
-                {(!installDependencies || maxDuration !== 5) && (
+                {(!installDependencies || maxDuration !== maxSandboxDuration || keepAlive) && (
                   <div className="hidden sm:flex items-center gap-2 flex-wrap">
                     {!installDependencies && (
                       <Badge
@@ -564,7 +494,7 @@ export function TaskForm({
                         </Button>
                       </Badge>
                     )}
-                    {maxDuration !== 5 && (
+                    {maxDuration !== maxSandboxDuration && (
                       <Badge
                         variant="secondary"
                         className="text-xs h-6 px-2 gap-1 cursor-pointer hover:bg-muted/20 bg-transparent border-0"
@@ -577,7 +507,27 @@ export function TaskForm({
                           className="h-3 w-3 p-0 hover:bg-transparent"
                           onClick={(e) => {
                             e.stopPropagation()
-                            updateMaxDuration(5)
+                            updateMaxDuration(maxSandboxDuration)
+                          }}
+                        >
+                          <X className="h-2 w-2" />
+                        </Button>
+                      </Badge>
+                    )}
+                    {keepAlive && (
+                      <Badge
+                        variant="secondary"
+                        className="text-xs h-6 px-2 gap-1 cursor-pointer hover:bg-muted/20 bg-transparent border-0"
+                        onClick={() => setShowOptionsDialog(true)}
+                      >
+                        Keep Alive
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-3 w-3 p-0 hover:bg-transparent"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            updateKeepAlive(false)
                           }}
                         >
                           <X className="h-2 w-2" />
@@ -589,140 +539,223 @@ export function TaskForm({
               </div>
 
               {/* Options and Submit Buttons */}
-
-              {/* Buttons - right side */}
-              <div className="flex items-center gap-2">
-                <TooltipProvider delayDuration={1500} skipDelayDuration={1500}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="rounded-full h-8 w-8 p-0 relative"
-                        onClick={() => setShowApiKeysDialog(true)}
-                      >
-                        <Key className="h-4 w-4" />
-                        {savedApiKeys.size > 0 && (
-                          <Badge
-                            variant="secondary"
-                            className="absolute -top-1 -right-1 h-4 min-w-4 p-0 flex items-center justify-center text-[10px] rounded-full"
+              <div className="flex items-center justify-between gap-2">
+                {/* Option Chips - Mobile version (left side) */}
+                <div className="flex sm:hidden items-center gap-2 flex-wrap">
+                  {(!installDependencies || maxDuration !== maxSandboxDuration || keepAlive) && (
+                    <>
+                      {!installDependencies && (
+                        <Badge
+                          variant="secondary"
+                          className="text-xs h-6 px-2 gap-1 cursor-pointer hover:bg-muted/20 bg-transparent border-0"
+                          onClick={() => setShowOptionsDialog(true)}
+                        >
+                          Skip Install
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-3 w-3 p-0 hover:bg-transparent"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              updateInstallDependencies(true)
+                            }}
                           >
-                            {savedApiKeys.size}
-                          </Badge>
-                        )}
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>API Keys</p>
-                    </TooltipContent>
-                  </Tooltip>
-
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="rounded-full h-8 w-8 p-0 relative"
-                        onClick={() => setShowMcpServersDialog(true)}
-                      >
-                        <Cable className="h-4 w-4" />
-                        {connectors.filter((c) => c.status === 'connected').length > 0 && (
-                          <Badge
-                            variant="secondary"
-                            className="absolute -top-1 -right-1 h-4 min-w-4 p-0 flex items-center justify-center text-[10px] rounded-full"
+                            <X className="h-2 w-2" />
+                          </Button>
+                        </Badge>
+                      )}
+                      {maxDuration !== maxSandboxDuration && (
+                        <Badge
+                          variant="secondary"
+                          className="text-xs h-6 px-2 gap-1 cursor-pointer hover:bg-muted/20 bg-transparent border-0"
+                          onClick={() => setShowOptionsDialog(true)}
+                        >
+                          {maxDuration}m
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-3 w-3 p-0 hover:bg-transparent"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              updateMaxDuration(maxSandboxDuration)
+                            }}
                           >
-                            {connectors.filter((c) => c.status === 'connected').length}
-                          </Badge>
-                        )}
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>MCP Servers</p>
-                    </TooltipContent>
-                  </Tooltip>
+                            <X className="h-2 w-2" />
+                          </Button>
+                        </Badge>
+                      )}
+                      {keepAlive && (
+                        <Badge
+                          variant="secondary"
+                          className="text-xs h-6 px-2 gap-1 cursor-pointer hover:bg-muted/20 bg-transparent border-0"
+                          onClick={() => setShowOptionsDialog(true)}
+                        >
+                          Keep Alive
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-3 w-3 p-0 hover:bg-transparent"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              updateKeepAlive(false)
+                            }}
+                          >
+                            <X className="h-2 w-2" />
+                          </Button>
+                        </Badge>
+                      )}
+                    </>
+                  )}
+                </div>
 
-                  <Dialog open={showOptionsDialog} onOpenChange={setShowOptionsDialog}>
+                {/* Buttons - right side */}
+                <div className="flex items-center gap-2">
+                  <TooltipProvider delayDuration={1500} skipDelayDuration={1500}>
                     <Tooltip>
                       <TooltipTrigger asChild>
-                        <DialogTrigger asChild>
-                          <Button type="button" variant="ghost" size="sm" className="rounded-full h-8 w-8 p-0">
-                            <Settings className="h-4 w-4" />
-                          </Button>
-                        </DialogTrigger>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="rounded-full h-8 w-8 p-0 relative"
+                          onClick={() => setShowApiKeysDialog(true)}
+                        >
+                          <Key className="h-4 w-4" />
+                          {savedApiKeys.size > 0 && (
+                            <Badge
+                              variant="secondary"
+                              className="absolute -top-1 -right-1 h-4 min-w-4 p-0 flex items-center justify-center text-[10px] rounded-full"
+                            >
+                              {savedApiKeys.size}
+                            </Badge>
+                          )}
+                        </Button>
                       </TooltipTrigger>
                       <TooltipContent>
-                        <p>Task Options</p>
+                        <p>API Keys</p>
                       </TooltipContent>
                     </Tooltip>
-                    <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
-                      <DialogHeader>
-                        <DialogTitle>Task Options</DialogTitle>
-                        <DialogDescription>Configure settings for your task execution.</DialogDescription>
-                      </DialogHeader>
-                      <div className="space-y-6 py-4 overflow-y-auto flex-1">
-                        <div className="space-y-4">
-                          <h3 className="text-sm font-semibold">Task Settings</h3>
-                          <div className="flex items-center space-x-2">
-                            <Checkbox
-                              id="install-deps"
-                              checked={installDependencies}
-                              onCheckedChange={(checked) => updateInstallDependencies(checked === true)}
-                            />
-                            <Label
-                              htmlFor="install-deps"
-                              className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="rounded-full h-8 w-8 p-0 relative"
+                          onClick={() => setShowMcpServersDialog(true)}
+                        >
+                          <Cable className="h-4 w-4" />
+                          {connectors.filter((c) => c.status === 'connected').length > 0 && (
+                            <Badge
+                              variant="secondary"
+                              className="absolute -top-1 -right-1 h-4 min-w-4 p-0 flex items-center justify-center text-[10px] rounded-full"
                             >
-                              Install Dependencies?
-                            </Label>
-                          </div>
-                          <div className="space-y-2">
-                            <Label htmlFor="max-duration" className="text-sm font-medium">
-                              Maximum Duration
-                            </Label>
-                            <Select
-                              value={maxDuration.toString()}
-                              onValueChange={(value) => updateMaxDuration(parseInt(value))}
-                            >
-                              <SelectTrigger id="max-duration" className="w-full">
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="1">1 minute</SelectItem>
-                                <SelectItem value="2">2 minutes</SelectItem>
-                                <SelectItem value="3">3 minutes</SelectItem>
-                                <SelectItem value="5">5 minutes</SelectItem>
-                                <SelectItem value="10">10 minutes</SelectItem>
-                                <SelectItem value="15">15 minutes</SelectItem>
-                                <SelectItem value="30">30 minutes</SelectItem>
-                              </SelectContent>
-                            </Select>
+                              {connectors.filter((c) => c.status === 'connected').length}
+                            </Badge>
+                          )}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>MCP Servers</p>
+                      </TooltipContent>
+                    </Tooltip>
+
+                    <Dialog open={showOptionsDialog} onOpenChange={setShowOptionsDialog}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <DialogTrigger asChild>
+                            <Button type="button" variant="ghost" size="sm" className="rounded-full h-8 w-8 p-0">
+                              <Settings className="h-4 w-4" />
+                            </Button>
+                          </DialogTrigger>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>Task Options</p>
+                        </TooltipContent>
+                      </Tooltip>
+                      <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+                        <DialogHeader>
+                          <DialogTitle>Task Options</DialogTitle>
+                          <DialogDescription>Configure settings for your task execution.</DialogDescription>
+                        </DialogHeader>
+                        <div className="space-y-6 py-4 overflow-y-auto flex-1">
+                          <div className="space-y-4">
+                            <h3 className="text-sm font-semibold">Task Settings</h3>
+                            <div className="flex items-center space-x-2">
+                              <Checkbox
+                                id="install-deps"
+                                checked={installDependencies}
+                                onCheckedChange={(checked) => updateInstallDependencies(checked === true)}
+                              />
+                              <Label
+                                htmlFor="install-deps"
+                                className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                              >
+                                Install Dependencies?
+                              </Label>
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor="max-duration" className="text-sm font-medium">
+                                Maximum Duration
+                              </Label>
+                              <Select
+                                value={maxDuration.toString()}
+                                onValueChange={(value) => updateMaxDuration(parseInt(value))}
+                              >
+                                <SelectTrigger id="max-duration" className="w-full">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="5">5 minutes</SelectItem>
+                                  <SelectItem value="10">10 minutes</SelectItem>
+                                  <SelectItem value="15">15 minutes</SelectItem>
+                                  <SelectItem value="30">30 minutes</SelectItem>
+                                  <SelectItem value="45">45 minutes</SelectItem>
+                                  <SelectItem value="60">1 hour</SelectItem>
+                                  <SelectItem value="120">2 hours</SelectItem>
+                                  <SelectItem value="180">3 hours</SelectItem>
+                                  <SelectItem value="240">4 hours</SelectItem>
+                                  <SelectItem value="300">5 hours</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            <div className="flex items-center space-x-2">
+                              <Checkbox
+                                id="keep-alive"
+                                checked={keepAlive}
+                                onCheckedChange={(checked) => updateKeepAlive(checked === true)}
+                              />
+                              <Label
+                                htmlFor="keep-alive"
+                                className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                              >
+                                Keep Alive ({maxSandboxDuration} {maxSandboxDuration === 1 ? 'hour' : 'hours'} max)
+                              </Label>
+                            </div>
+                            <p className="text-xs text-muted-foreground">
+                              Keep the sandbox running after task completion to reuse it for follow-up messages.
+                            </p>
                           </div>
                         </div>
-                      </div>
-                    </DialogContent>
-                  </Dialog>
-                </TooltipProvider>
+                      </DialogContent>
+                    </Dialog>
+                  </TooltipProvider>
 
-                <Button
-                  type="submit"
-                  disabled={isSubmitting || !prompt.trim()}
-                  size="sm"
-                  className="rounded-full h-8 w-8 p-0"
-                >
-                  {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
-                </Button>
+                  <Button
+                    type="submit"
+                    disabled={isSubmitting || !prompt.trim() || !selectedOwner || !selectedRepo}
+                    size="sm"
+                    className="rounded-full h-8 w-8 p-0"
+                  >
+                    {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
+                  </Button>
+                </div>
               </div>
             </div>
           </div>
         </div>
       </form>
-
-      {/* Additional Tools */}
-      <div className="mt-4 flex justify-center">
-        <ImageGenerator />
-      </div>
 
       <ApiKeysDialog
         open={showApiKeysDialog}

@@ -3,7 +3,7 @@
 import { Task } from '@/lib/db/schema'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { AlertCircle, Plus, Trash2, Clock } from 'lucide-react'
+import { AlertCircle, Plus, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
@@ -39,12 +39,6 @@ const AGENT_MODELS = {
     { value: 'openai/gpt-5-nano', label: 'GPT-5 nano' },
     { value: 'gpt-5-pro', label: 'GPT-5 pro' },
     { value: 'openai/gpt-4.1', label: 'GPT-4.1' },
-    { value: 'gpt-4o', label: 'GPT-4o' },
-  ],
-  grok: [
-    { value: 'grok-2-latest', label: 'Grok 2 Latest' },
-    { value: 'grok-2-vision-1212', label: 'Grok 2 Vision' },
-    { value: 'grok-beta', label: 'Grok Beta' },
   ],
   cursor: [
     { value: 'auto', label: 'Auto' },
@@ -145,8 +139,6 @@ export function TaskSidebar({ tasks, onTaskSelect, width = 288 }: TaskSidebarPro
         return Claude
       case 'codex':
         return Codex
-      case 'grok':
-        return () => <span className="text-lg">𝕏</span>
       case 'cursor':
         return Cursor
       case 'gemini':
@@ -267,12 +259,6 @@ export function TaskSidebar({ tasks, onTaskSelect, width = 288 }: TaskSidebarPro
                           {task.status === 'error' && <AlertCircle className="h-3 w-3 text-red-500 flex-shrink-0" />}
                           {task.status === 'stopped' && (
                             <AlertCircle className="h-3 w-3 text-orange-500 flex-shrink-0" />
-                          )}
-                          {task.status === 'queued' && task.queuePosition && (
-                            <div className="flex items-center gap-0.5 text-xs text-muted-foreground flex-shrink-0">
-                              <Clock className="h-3 w-3" />
-                              <span>#{task.queuePosition}</span>
-                            </div>
                           )}
                         </div>
                         {task.repoUrl && (

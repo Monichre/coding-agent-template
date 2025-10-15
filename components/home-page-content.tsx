@@ -18,6 +18,8 @@ interface HomePageContentProps {
   initialSelectedRepo?: string
   initialInstallDependencies?: boolean
   initialMaxDuration?: number
+  initialKeepAlive?: boolean
+  maxSandboxDuration?: number
   user?: Session['user'] | null
   initialStars?: number
 }
@@ -27,8 +29,10 @@ export function HomePageContent({
   initialSelectedRepo = '',
   initialInstallDependencies = false,
   initialMaxDuration = 5,
+  initialKeepAlive = false,
+  maxSandboxDuration = 5,
   user = null,
-  initialStars = 994,
+  initialStars = 1022,
 }: HomePageContentProps) {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [selectedOwner, setSelectedOwnerState] = useState(initialSelectedOwner)
@@ -38,7 +42,7 @@ export function HomePageContent({
   const [loadingGitHub, setLoadingGitHub] = useState(false)
   const router = useRouter()
   const searchParams = useSearchParams()
-  const { refreshTasks, addTaskOptimistically, removeTaskOptimistically } = useTasks()
+  const { refreshTasks, addTaskOptimistically } = useTasks()
 
   // Show toast if GitHub was connected (user was already logged in)
   useEffect(() => {
@@ -74,6 +78,7 @@ export function HomePageContent({
     selectedModel: string
     installDependencies: boolean
     maxDuration: number
+    keepAlive: boolean
   }) => {
     // Check if user is authenticated
     if (!user) {
@@ -106,17 +111,14 @@ export function HomePageContent({
         const error = await response.json()
         // Show detailed message for rate limits, or generic error message
         toast.error(error.message || error.error || 'Failed to create task')
-        // Remove the optimistic task on error and navigate home
-        removeTaskOptimistically(id)
-        router.push('/')
+        // TODO: Remove the optimistic task on error
+        await refreshTasks() // For now, just refresh to remove the optimistic task
       }
     } catch (error) {
       console.error('Error creating task:', error)
       toast.error('Failed to create task')
-      // Remove the optimistic task on error
-      removeTaskOptimistically(id)
-      // Navigate back to home if we're on the failed task page
-      router.push('/')
+      // TODO: Remove the optimistic task on error
+      await refreshTasks() // For now, just refresh to remove the optimistic task
     } finally {
       setIsSubmitting(false)
     }
@@ -153,6 +155,8 @@ export function HomePageContent({
           selectedRepo={selectedRepo}
           initialInstallDependencies={initialInstallDependencies}
           initialMaxDuration={initialMaxDuration}
+          initialKeepAlive={initialKeepAlive}
+          maxSandboxDuration={maxSandboxDuration}
         />
       </div>
 

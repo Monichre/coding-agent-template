@@ -2,15 +2,13 @@ import { Sandbox } from '@vercel/sandbox'
 import { AgentExecutionResult } from '../types'
 import { executeClaudeInSandbox } from './claude'
 import { executeCodexInSandbox } from './codex'
-import { executeGrokInSandbox } from './grok'
 import { executeCursorInSandbox } from './cursor'
 import { executeGeminiInSandbox } from './gemini'
 import { executeOpenCodeInSandbox } from './opencode'
-import { executeCustomAgentInSandbox } from './custom'
 import { TaskLogger } from '@/lib/utils/task-logger'
 import { Connector } from '@/lib/db/schema'
 
-export type AgentType = 'claude' | 'codex' | 'grok' | 'cursor' | 'gemini' | 'opencode' | string // Allow custom agent IDs
+export type AgentType = 'claude' | 'codex' | 'cursor' | 'gemini' | 'opencode'
 
 // Re-export types
 export type { AgentExecutionResult } from '../types'
@@ -31,6 +29,10 @@ export async function executeAgentInSandbox(
     ANTHROPIC_API_KEY?: string
     AI_GATEWAY_API_KEY?: string
   },
+  isResumed?: boolean,
+  sessionId?: string,
+  taskId?: string,
+  agentMessageId?: string,
 ): Promise<AgentExecutionResult> {
   // Check for cancellation before starting agent execution
   if (onCancellationCheck && (await onCancellationCheck())) {
@@ -59,23 +61,64 @@ export async function executeAgentInSandbox(
   if (apiKeys?.AI_GATEWAY_API_KEY) process.env.AI_GATEWAY_API_KEY = apiKeys.AI_GATEWAY_API_KEY
 
   try {
-    // Handle built-in agents (with custom agent fallback)
     switch (agentType) {
       case 'claude':
-        return await executeClaudeInSandbox(sandbox, instruction, logger, selectedModel, mcpServers)
+        return await executeClaudeInSandbox(
+          sandbox,
+          instruction,
+          logger,
+          selectedModel,
+          mcpServers,
+          isResumed,
+          sessionId,
+          taskId,
+          agentMessageId,
+        )
+
       case 'codex':
-        return await executeCodexInSandbox(sandbox, instruction, logger, selectedModel, mcpServers)
+        return await executeCodexInSandbox(
+          sandbox,
+          instruction,
+          logger,
+          selectedModel,
+          mcpServers,
+          isResumed,
+          sessionId,
+        )
+
       case 'cursor':
-        return await executeCursorInSandbox(sandbox, instruction, logger, selectedModel, mcpServers)
+        return await executeCursorInSandbox(
+          sandbox,
+          instruction,
+          logger,
+          selectedModel,
+          mcpServers,
+          isResumed,
+          sessionId,
+          taskId,
+        )
+
       case 'gemini':
         return await executeGeminiInSandbox(sandbox, instruction, logger, selectedModel, mcpServers)
+
       case 'opencode':
-        return await executeOpenCodeInSandbox(sandbox, instruction, logger, selectedModel, mcpServers)
-      case 'grok':
-        return await executeGrokInSandbox(sandbox, instruction, logger, selectedModel)
+        return await executeOpenCodeInSandbox(
+          sandbox,
+          instruction,
+          logger,
+          selectedModel,
+          mcpServers,
+          isResumed,
+          sessionId,
+        )
+
       default:
-        // Assume it's a custom agent ID
-        return await executeCustomAgentInSandbox(sandbox, instruction, agentType, logger, selectedModel)
+        return {
+          success: false,
+          error: `Unknown agent type: ${agentType}`,
+          cliName: agentType,
+          changesDetected: false,
+        }
     }
   } finally {
     // Restore original environment variables

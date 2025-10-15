@@ -32,7 +32,6 @@ interface TasksContextType {
     installDependencies: boolean
     maxDuration: number
   }) => { id: string; optimisticTask: Task }
-  removeTaskOptimistically: (taskId: string) => void
 }
 
 const TasksContext = createContext<TasksContextType | undefined>(undefined)
@@ -222,11 +221,14 @@ export function AppLayout({ children, initialSidebarWidth, initialSidebarOpen, i
       selectedModel: taskData.selectedModel,
       installDependencies: taskData.installDependencies,
       maxDuration: taskData.maxDuration,
+      keepAlive: false,
       status: 'pending',
       progress: 0,
       logs: [],
       error: null,
       branchName: null,
+      sandboxId: null,
+      agentSessionId: null,
       sandboxUrl: null,
       previewUrl: null,
       mcpServerIds: null,
@@ -244,10 +246,6 @@ export function AppLayout({ children, initialSidebarWidth, initialSidebarOpen, i
     setTasks((prevTasks) => [optimisticTask, ...prevTasks])
 
     return { id, optimisticTask }
-  }
-
-  const removeTaskOptimistically = (taskId: string) => {
-    setTasks((prevTasks) => prevTasks.filter((task) => task.id !== taskId))
   }
 
   const closeSidebar = () => {
@@ -299,7 +297,6 @@ export function AppLayout({ children, initialSidebarWidth, initialSidebarOpen, i
         isSidebarOpen,
         isSidebarResizing: isResizing,
         addTaskOptimistically,
-        removeTaskOptimistically,
       }}
     >
       <ConnectorsProvider>

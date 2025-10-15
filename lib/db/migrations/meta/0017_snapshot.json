@@ -1,6 +1,6 @@
 {
-  "id": "be819f40-1811-452d-90f5-3f9414acf36a",
-  "prevId": "88ce3ae1-b542-47dd-a713-5fd28047ca7d",
+  "id": "6109d3e0-a178-4df6-92c8-9cd69514318b",
+  "prevId": "be819f40-1811-452d-90f5-3f9414acf36a",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -472,6 +472,12 @@
         },
         "sandbox_id": {
           "name": "sandbox_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "agent_session_id": {
+          "name": "agent_session_id",
           "type": "text",
           "primaryKey": false,
           "notNull": false
