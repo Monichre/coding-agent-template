@@ -1,39 +1,53 @@
 'use client'
 
+import { useState } from 'react'
 import { useTask } from '@/lib/hooks/use-task'
 import { TaskDetails } from '@/components/task-details'
 import { TaskPageHeader } from '@/components/task-page-header'
 import { PageHeader } from '@/components/page-header'
-import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { MoreHorizontal } from 'lucide-react'
 import { useTasks } from '@/components/app-layout'
+import { LogsPane } from '@/components/logs-pane'
 import { VERCEL_DEPLOY_URL } from '@/lib/constants'
-import { TaskImages } from '@/components/task-images'
+import { User } from '@/components/auth/user'
+import type { Session } from '@/lib/session/types'
+import { GitHubStarsButton } from '@/components/github-stars-button'
 
 interface TaskPageClientProps {
   taskId: string
+  user: Session['user'] | null
+  authProvider: Session['authProvider'] | null
+  initialStars?: number
+  maxSandboxDuration?: number
 }
 
-export function TaskPageClient({ taskId }: TaskPageClientProps) {
+export function TaskPageClient({
+  taskId,
+  user,
+  authProvider,
+  initialStars = 1022,
+  maxSandboxDuration = 5,
+}: TaskPageClientProps) {
   const { task, isLoading, error } = useTask(taskId)
   const { toggleSidebar } = useTasks()
+  const [logsPaneHeight, setLogsPaneHeight] = useState(40) // Default to collapsed height
 
   if (isLoading) {
     return (
       <div className="flex-1 bg-background">
-        <div className="mx-auto p-3">
+        <div className="p-3">
           <PageHeader
             showMobileMenu={true}
             onToggleMobileMenu={toggleSidebar}
             actions={
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 h-8">
+                <GitHubStarsButton initialStars={initialStars} />
                 {/* Deploy to Vercel Button */}
                 <Button
                   asChild
                   variant="outline"
                   size="sm"
-                  className="h-8 px-3 text-xs bg-black text-white border-black hover:bg-black/90 dark:bg-white dark:text-black dark:border-white dark:hover:bg-white/90"
+                  className="h-8 sm:px-3 px-0 sm:w-auto w-8 bg-black text-white border-black hover:bg-black/90 dark:bg-white dark:text-black dark:border-white dark:hover:bg-white/90"
                 >
                   <a
                     href={VERCEL_DEPLOY_URL}
@@ -44,33 +58,15 @@ export function TaskPageClient({ taskId }: TaskPageClientProps) {
                     <svg viewBox="0 0 76 65" className="h-3 w-3" fill="currentColor">
                       <path d="M37.5274 0L75.0548 65H0L37.5274 0Z" />
                     </svg>
-                    Deploy to Vercel
+                    <span className="hidden sm:inline">Deploy Your Own</span>
                   </a>
                 </Button>
 
-                {/* More Actions Menu Placeholder */}
-                <Button variant="ghost" size="sm" className="h-8 w-8 p-0" disabled>
-                  <MoreHorizontal className="h-4 w-4" />
-                </Button>
+                {/* User Authentication */}
+                <User user={user} authProvider={authProvider} />
               </div>
             }
           />
-
-          <div className="max-w-4xl mx-auto">
-            <div className="flex-1 p-6 overflow-y-auto">
-              <div className="max-w-4xl mx-auto space-y-6">
-                {/* Task Info Skeleton - 339px height */}
-                <Card className="h-[339px]">
-                  <CardContent className="space-y-4"></CardContent>
-                </Card>
-
-                {/* Logs Skeleton - 512px height */}
-                <Card className="h-[512px]">
-                  <CardContent></CardContent>
-                </Card>
-              </div>
-            </div>
-          </div>
         </div>
       </div>
     )
@@ -79,6 +75,38 @@ export function TaskPageClient({ taskId }: TaskPageClientProps) {
   if (error || !task) {
     return (
       <div className="flex-1 bg-background">
+        <div className="p-3">
+          <PageHeader
+            showMobileMenu={true}
+            onToggleMobileMenu={toggleSidebar}
+            showPlatformName={true}
+            actions={
+              <div className="flex items-center gap-2 h-8">
+                <GitHubStarsButton initialStars={initialStars} />
+                {/* Deploy to Vercel Button */}
+                <Button
+                  asChild
+                  variant="outline"
+                  size="sm"
+                  className="h-8 sm:px-3 px-0 sm:w-auto w-8 bg-black text-white border-black hover:bg-black/90 dark:bg-white dark:text-black dark:border-white dark:hover:bg-white/90"
+                >
+                  <a
+                    href={VERCEL_DEPLOY_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1.5"
+                  >
+                    <svg viewBox="0 0 76 65" className="h-3 w-3" fill="currentColor">
+                      <path d="M37.5274 0L75.0548 65H0L37.5274 0Z" />
+                    </svg>
+                    <span className="hidden sm:inline">Deploy Your Own</span>
+                  </a>
+                </Button>
+                <User user={user} authProvider={authProvider} />
+              </div>
+            }
+          />
+        </div>
         <div className="mx-auto p-3">
           <div className="flex items-center justify-center h-64">
             <div className="text-center">
@@ -92,16 +120,18 @@ export function TaskPageClient({ taskId }: TaskPageClientProps) {
   }
 
   return (
-    <div className="flex-1 bg-background">
-      <div className="mx-auto p-3">
-        <TaskPageHeader task={task} />
-
-        {/* Task details */}
-        <div className="max-w-4xl mx-auto space-y-6">
-          <TaskDetails task={task} />
-          <TaskImages taskId={task.id} />
-        </div>
+    <div className="flex-1 bg-background relative flex flex-col h-full overflow-hidden">
+      <div className="flex-shrink-0 p-3">
+        <TaskPageHeader task={task} user={user} authProvider={authProvider} initialStars={initialStars} />
       </div>
+
+      {/* Task details */}
+      <div className="flex-1 flex flex-col min-h-0 overflow-hidden" style={{ paddingBottom: `${logsPaneHeight}px` }}>
+        <TaskDetails task={task} maxSandboxDuration={maxSandboxDuration} />
+      </div>
+
+      {/* Logs pane at bottom */}
+      <LogsPane task={task} onHeightChange={setLogsPaneHeight} />
     </div>
   )
 }

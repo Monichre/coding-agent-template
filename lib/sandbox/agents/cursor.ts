@@ -3,6 +3,12 @@ import { runCommandInSandbox } from '../commands'
 import { AgentExecutionResult } from '../types'
 import { redactSensitiveInfo } from '@/lib/utils/logging'
 import { TaskLogger } from '@/lib/utils/task-logger'
+import { connectors, taskMessages } from '@/lib/db/schema'
+import { db } from '@/lib/db/client'
+import { eq } from 'drizzle-orm'
+import { generateId } from '@/lib/utils/id'
+
+type Connector = typeof connectors.$inferSelect
 
 // Helper function to run command and collect
 async function runAndLogCommand(sandbox: Sandbox, command: string, args: string[], logger: TaskLogger) {
@@ -27,37 +33,57 @@ export async function executeCursorInSandbox(
   instruction: string,
   logger: TaskLogger,
   selectedModel?: string,
+  mcpServers?: Connector[],
+  isResumed?: boolean,
+  sessionId?: string,
+  taskId?: string,
 ): Promise<AgentExecutionResult> {
   try {
     // Executing Cursor CLI with instruction
 
-    // Install Cursor CLI using the official installer
-    // Installing Cursor CLI
-    if (logger) {
-      await logger.info('Starting Cursor CLI installation...')
-    }
+    // Check if Cursor CLI is already installed (for resumed sandboxes)
+    const existingCliCheck = await runCommandInSandbox(
+      sandbox,
+      'sh',
+      ['-c', 'export PATH="$HOME/.local/bin:$PATH"; which cursor-agent 2>/dev/null'],
+      // Don't log this check to avoid cluttering logs
+    )
 
-    // Install Cursor CLI using the official installation script with timeout
-    // Add debugging to see what the installation script does
-    const installCommand = 'timeout 300 bash -c "curl https://cursor.com/install -fsS | bash -s -- --verbose"'
-    const cursorInstall = await runAndLogCommand(sandbox, 'sh', ['-c', installCommand], logger)
+    let cursorInstall: { success: boolean; output?: string; error?: string } = { success: true }
 
-    // After installation, check what was installed and where
-    if (logger) {
-      await logger.info('Installation completed, checking what was installed...')
-    }
+    if (existingCliCheck.success && existingCliCheck.output?.includes('cursor-agent')) {
+      // CLI already installed, skip installation
+      if (logger) {
+        await logger.info('Cursor CLI already installed, skipping installation')
+      }
+    } else {
+      // Install Cursor CLI using the official installer
+      if (logger) {
+        await logger.info('Starting Cursor CLI installation...')
+      }
 
-    const postInstallChecks = [
-      'ls -la ~/.local/bin/ 2>/dev/null || echo "No ~/.local/bin directory"',
-      'echo "Current PATH: $PATH"',
-      'export PATH="$HOME/.local/bin:$PATH"; which cursor-agent || echo "cursor-agent not found even with updated PATH"',
-      'export PATH="$HOME/.local/bin:$PATH"; cursor-agent --version || echo "cursor-agent version check failed"',
-    ]
+      // Install Cursor CLI using the official installation script with timeout
+      // Add debugging to see what the installation script does
+      const installCommand = 'timeout 300 bash -c "curl https://cursor.com/install -fsS | bash -s -- --verbose"'
+      cursorInstall = await runAndLogCommand(sandbox, 'sh', ['-c', installCommand], logger)
 
-    for (const checkCmd of postInstallChecks) {
-      const checkResult = await runAndLogCommand(sandbox, 'sh', ['-c', checkCmd], logger)
-      if (logger && checkResult.output) {
-        await logger.info(`Post-install check "${checkCmd}": ${checkResult.output}`)
+      // After installation, check what was installed and where
+      if (logger) {
+        await logger.info('Installation completed, checking what was installed...')
+      }
+
+      const postInstallChecks = [
+        'ls -la ~/.local/bin/ 2>/dev/null || echo "No ~/.local/bin directory"',
+        'echo "Current PATH: $PATH"',
+        'export PATH="$HOME/.local/bin:$PATH"; which cursor-agent || echo "cursor-agent not found even with updated PATH"',
+        'export PATH="$HOME/.local/bin:$PATH"; cursor-agent --version || echo "cursor-agent version check failed"',
+      ]
+
+      for (const checkCmd of postInstallChecks) {
+        const checkResult = await runAndLogCommand(sandbox, 'sh', ['-c', checkCmd], logger)
+        if (logger && checkResult.output) {
+          await logger.info('Post-install check completed')
+        }
       }
     }
 
@@ -110,7 +136,7 @@ export async function executeCursorInSandbox(
       for (const searchCmd of searchPaths) {
         const searchResult = await runAndLogCommand(sandbox, 'sh', ['-c', searchCmd], logger)
         if (logger && searchResult.output) {
-          await logger.info(`Search result for "${searchCmd}": ${searchResult.output}`)
+          await logger.info('Search completed')
         }
       }
 
@@ -132,6 +158,90 @@ export async function executeCursorInSandbox(
       }
     }
 
+    // Configure MCP servers if provided
+    if (mcpServers && mcpServers.length > 0) {
+      await logger.info('Configuring MCP servers')
+
+      // Create mcp.json configuration file
+      const mcpConfig: {
+        mcpServers: Record<
+          string,
+          | { url: string; headers?: Record<string, string> }
+          | { command: string; args?: string[]; env?: Record<string, string> }
+        >
+      } = {
+        mcpServers: {},
+      }
+
+      for (const server of mcpServers) {
+        const serverName = server.name.toLowerCase().replace(/[^a-z0-9]/g, '-')
+
+        if (server.type === 'local') {
+          // Local STDIO server - parse command string into command and args
+          const commandParts = server.command!.trim().split(/\s+/)
+          const executable = commandParts[0]
+          const args = commandParts.slice(1)
+
+          // Parse env from JSON string if present
+          let envObject: Record<string, string> | undefined
+          if (server.env) {
+            try {
+              envObject = JSON.parse(server.env)
+            } catch (e) {
+              await logger.info('Warning: Failed to parse env for MCP server')
+            }
+          }
+
+          mcpConfig.mcpServers[serverName] = {
+            command: executable,
+            ...(args.length > 0 ? { args } : {}),
+            ...(envObject ? { env: envObject } : {}),
+          }
+          await logger.info('Added local MCP server')
+        } else {
+          // Remote HTTP/SSE server
+          mcpConfig.mcpServers[serverName] = {
+            url: server.baseUrl!,
+          }
+
+          // Merge headers from oauth and env
+          const headers: Record<string, string> = {}
+          if (server.oauthClientSecret) {
+            headers.Authorization = `Bearer ${server.oauthClientSecret}`
+          }
+          if (server.oauthClientId) {
+            headers['X-Client-ID'] = server.oauthClientId
+          }
+          if (Object.keys(headers).length > 0) {
+            mcpConfig.mcpServers[serverName].headers = headers
+          }
+
+          await logger.info('Added remote MCP server')
+        }
+      }
+
+      // Write the mcp.json file to the Cursor config directory (not project directory)
+      const mcpConfigJson = JSON.stringify(mcpConfig, null, 2)
+      const createMcpConfigCmd = `mkdir -p ~/.cursor && cat > ~/.cursor/mcp.json << 'EOF'
+${mcpConfigJson}
+EOF`
+
+      await logger.info('Creating Cursor MCP configuration file...')
+      const mcpConfigResult = await runCommandInSandbox(sandbox, 'sh', ['-c', createMcpConfigCmd])
+
+      if (mcpConfigResult.success) {
+        await logger.info('MCP configuration file (~/.cursor/mcp.json) created successfully')
+
+        // Verify the file was created (without logging sensitive contents)
+        const verifyMcpConfig = await runCommandInSandbox(sandbox, 'test', ['-f', '~/.cursor/mcp.json'])
+        if (verifyMcpConfig.success) {
+          await logger.info('MCP configuration verified')
+        }
+      } else {
+        await logger.info('Warning: Failed to create MCP configuration file')
+      }
+    }
+
     // Execute Cursor CLI with the instruction using print mode and force flag for file modifications
     if (logger) {
       await logger.info('Starting Cursor CLI execution with instruction...')
@@ -145,24 +255,30 @@ export async function executeCursorInSandbox(
       logger,
     )
     if (logger) {
-      await logger.info(`Pre-execution cursor-agent check: ${preExecCheck.success ? 'FOUND' : 'NOT FOUND'}`)
+      await logger.info('Pre-execution cursor-agent check completed')
       if (preExecCheck.output) {
-        await logger.info(`cursor-agent location: ${preExecCheck.output}`)
+        await logger.info('cursor-agent location found')
       }
     }
 
     // Use the correct flags: -p for print mode (non-interactive), --force for file modifications
     // Try multiple approaches to find and execute cursor-agent
-    let result
 
     // Log what we're about to execute
     const modelFlag = selectedModel ? ` --model ${selectedModel}` : ''
-    const logCommand = `cursor-agent -p --force --output-format json${modelFlag} "${instruction}"`
-    await logger.command(logCommand)
+    const resumeFlag = isResumed && sessionId ? ` --resume ${sessionId}` : ''
+    const logCommand = `cursor-agent -p --force --output-format stream-json${modelFlag}${resumeFlag} "${instruction}"`
     if (logger) {
       await logger.command(logCommand)
       if (selectedModel) {
-        await logger.info(`Executing cursor-agent with model: ${selectedModel}`)
+        await logger.info('Executing cursor-agent with model')
+      }
+      if (isResumed) {
+        if (sessionId) {
+          await logger.info('Resuming specific chat session')
+        } else {
+          await logger.info('Resuming previous conversation')
+        }
       }
       await logger.info('Executing cursor-agent directly without shell wrapper')
     }
@@ -184,10 +300,84 @@ export async function executeCursorInSandbox(
       (error?: Error | null): void
     }
 
+    let accumulatedContent = ''
+    let extractedSessionId: string | undefined
+
     const captureStdout = new Writable({
       write(chunk: Buffer | string, encoding: BufferEncoding, callback: WriteCallback) {
         const data = chunk.toString()
-        capturedOutput += data
+
+        // Only capture raw output if we're NOT streaming to database
+        // When streaming, we build clean content in the database instead
+        if (!agentMessageId || !taskId) {
+          capturedOutput += data
+        }
+
+        // Parse streaming JSON chunks - always do this to extract session_id
+        const lines = data.split('\n')
+        for (const line of lines) {
+          if (line.trim()) {
+            try {
+              const parsed = JSON.parse(line)
+
+              // Always extract session_id from result
+              if (parsed.type === 'result' && parsed.session_id) {
+                extractedSessionId = parsed.session_id
+              }
+
+              // Only update database if streaming to taskId
+              if (agentMessageId && taskId) {
+                // Handle different chunk types from Cursor's stream-json format
+                if (parsed.type === 'tool_call') {
+                  // Show tool execution status
+                  if (parsed.subtype === 'started') {
+                    const toolName = Object.keys(parsed.tool_call || {})[0]
+                    let statusMsg = ''
+
+                    if (toolName === 'editToolCall') {
+                      const path = parsed.tool_call?.editToolCall?.args?.path || 'file'
+                      statusMsg = `\n\nEditing ${path}`
+                    } else if (toolName === 'readToolCall') {
+                      const path = parsed.tool_call?.readToolCall?.args?.path || 'file'
+                      statusMsg = `\n\nReading ${path}`
+                    } else if (toolName === 'runCommandToolCall') {
+                      statusMsg = `\n\nRunning command`
+                    } else if (toolName === 'listDirectoryToolCall') {
+                      statusMsg = `\n\nListing directory`
+                    } else {
+                      statusMsg = `\n\nExecuting ${toolName}`
+                    }
+
+                    if (statusMsg) {
+                      accumulatedContent += statusMsg
+                      db.update(taskMessages)
+                        .set({ content: accumulatedContent })
+                        .where(eq(taskMessages.id, agentMessageId))
+                        .catch((err: Error) => console.error('Failed to update message:', err))
+                    }
+                  }
+                } else if (parsed.type === 'assistant' && parsed.message?.content) {
+                  // Extract text from assistant message content array
+                  const textContent = parsed.message.content
+                    .filter((item: { type: string; text?: string }) => item.type === 'text')
+                    .map((item: { text?: string }) => item.text)
+                    .join('')
+
+                  if (textContent) {
+                    accumulatedContent += '\n\n' + textContent
+                    // Update message in database (non-blocking)
+                    db.update(taskMessages)
+                      .set({ content: accumulatedContent })
+                      .where(eq(taskMessages.id, agentMessageId))
+                      .catch((err: Error) => console.error('Failed to update message:', err))
+                  }
+                }
+              }
+            } catch {
+              // Ignore JSON parse errors for non-JSON lines
+            }
+          }
+        }
 
         // Check if we got the completion JSON
         if (
@@ -211,11 +401,27 @@ export async function executeCursorInSandbox(
       },
     })
 
+    // Create initial agent message in database if taskId provided
+    let agentMessageId: string | null = null
+    if (taskId) {
+      agentMessageId = generateId(12)
+      await db.insert(taskMessages).values({
+        id: agentMessageId,
+        taskId,
+        role: 'agent',
+        content: '', // Start with empty content, will be updated as chunks arrive
+      })
+    }
+
     // Start the command with output capture
     // Add model parameter if provided
-    const args = ['-p', '--force', '--output-format', 'json']
+    const args = ['-p', '--force', '--output-format', 'stream-json']
     if (selectedModel) {
       args.push('--model', selectedModel)
+    }
+    // Add --resume flag only if we have a sessionId to resume
+    if (isResumed && sessionId) {
+      args.push('--resume', sessionId)
     }
     args.push(instruction)
 
@@ -235,82 +441,83 @@ export async function executeCursorInSandbox(
       await logger.info('Cursor command started with output capture, monitoring for completion...')
     }
 
-    // Poll for completion instead of waiting for the API
+    // Wait for completion - let sandbox timeout handle the hard limit
     let attempts = 0
-    const maxAttempts = 60 // 60 seconds max
 
-    while (!isCompleted && attempts < maxAttempts) {
+    while (!isCompleted) {
       await new Promise((resolve) => setTimeout(resolve, 1000)) // Wait 1 second
       attempts++
 
-      if (attempts % 10 === 0 && logger) {
-        await logger.info(`Still waiting for completion... ${attempts}s elapsed`)
+      // Safety check: if we've been waiting over 4 minutes, break and check git status
+      // (sandbox timeout is 5 minutes, so we leave a buffer)
+      if (attempts > 240) {
+        if (logger) {
+          await logger.info('Approaching sandbox timeout, checking for changes...')
+        }
+        break
       }
     }
 
     if (isCompleted) {
       if (logger) {
-        await logger.info(`Cursor completed successfully in ${attempts} seconds`)
-      }
-
-      result = {
-        success: true,
-        output: capturedOutput,
-        error: capturedError,
-        command: logCommand,
+        await logger.info('Cursor completed successfully')
       }
     } else {
       if (logger) {
-        await logger.info('Timeout waiting for completion, but may have succeeded')
+        await logger.info('Cursor execution ended, checking for changes')
       }
+    }
 
-      result = {
-        success: false,
-        output: capturedOutput,
-        error: capturedError || 'Timeout waiting for completion',
-        command: logCommand,
-      }
+    const result = {
+      success: true, // We'll determine actual success based on git changes
+      output: capturedOutput,
+      error: capturedError,
+      command: logCommand,
     }
 
     // Log the output and error results (similar to Claude)
-    if (result.output && result.output.trim()) {
+    // Skip logging raw output when streaming to database (we've already built clean content there)
+    if (result.output && result.output.trim() && !agentMessageId) {
       const redactedOutput = redactSensitiveInfo(result.output.trim())
       await logger.info(redactedOutput)
-      if (logger) {
-        await logger.info(redactedOutput)
-      }
     }
 
-    if (!result.success && result.error) {
+    if (result.error && result.error.trim()) {
       const redactedError = redactSensitiveInfo(result.error)
       await logger.error(redactedError)
-      if (logger) {
-        await logger.error(redactedError)
-      }
     }
 
     // Cursor CLI execution completed
 
-    // Check if any files were modified
+    // Session ID is now extracted during streaming parse above
+
+    // Check if any files were modified - this is the real indicator of success
     const gitStatusCheck = await runAndLogCommand(sandbox, 'git', ['status', '--porcelain'], logger)
     const hasChanges = gitStatusCheck.success && gitStatusCheck.output?.trim()
 
-    if (result.success) {
+    // Determine success based on whether changes were made
+    const actualSuccess = !!hasChanges
+
+    if (actualSuccess) {
       return {
         success: true,
-        output: `Cursor CLI executed successfully${hasChanges ? ' (Changes detected)' : ' (No changes made)'}`,
-        agentResponse: result.output || 'Cursor CLI completed the task',
+        output: `Cursor CLI executed successfully (Changes detected)`,
+        // When streaming to DB, agentResponse is already in chat; omit it here
+        agentResponse: agentMessageId ? undefined : result.output || 'Cursor CLI completed the task',
         cliName: 'cursor',
-        changesDetected: !!hasChanges,
+        changesDetected: true,
         error: undefined,
+        sessionId: extractedSessionId, // Include session_id for resumption
       }
     } else {
       return {
         success: false,
-        error: `Cursor CLI failed: ${result.error || 'No error message'}`,
-        agentResponse: result.output,
+        error: `Cursor CLI failed: No changes were made to the repository`,
+        // When streaming to DB, omit agentResponse
+        agentResponse: agentMessageId ? undefined : result.output,
         cliName: 'cursor',
-        changesDetected: !!hasChanges,
+        changesDetected: false,
+        sessionId: extractedSessionId, // Include session_id even on failure
       }
     }
   } catch (error: unknown) {

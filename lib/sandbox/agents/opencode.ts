@@ -3,6 +3,9 @@ import { runCommandInSandbox } from '../commands'
 import { AgentExecutionResult } from '../types'
 import { redactSensitiveInfo } from '@/lib/utils/logging'
 import { TaskLogger } from '@/lib/utils/task-logger'
+import { connectors } from '@/lib/db/schema'
+
+type Connector = typeof connectors.$inferSelect
 
 // Helper function to run command and log it
 async function runAndLogCommand(sandbox: Sandbox, command: string, args: string[], logger: TaskLogger) {
@@ -45,6 +48,9 @@ export async function executeOpenCodeInSandbox(
   instruction: string,
   logger: TaskLogger,
   selectedModel?: string,
+  mcpServers?: Connector[],
+  isResumed?: boolean,
+  sessionId?: string,
 ): Promise<AgentExecutionResult> {
   try {
     // Executing OpenCode with instruction
@@ -62,27 +68,39 @@ export async function executeOpenCodeInSandbox(
       }
     }
 
-    // Install OpenCode using the official npm package
-    // Installing OpenCode CLI
-    if (logger) {
-      await logger.info('Installing OpenCode CLI...')
-    }
+    // Check if OpenCode CLI is already installed (for resumed sandboxes)
+    const existingCLICheck = await runCommandInSandbox(sandbox, 'which', ['opencode'])
 
-    const installResult = await runAndLogCommand(sandbox, 'npm', ['install', '-g', 'opencode-ai'], logger)
+    let installResult: { success: boolean; output?: string; error?: string } = { success: true }
 
-    if (!installResult.success) {
-      console.error('OpenCode CLI installation failed:', { error: installResult.error })
-      return {
-        success: false,
-        error: `Failed to install OpenCode CLI: ${installResult.error || 'Unknown error'}`,
-        cliName: 'opencode',
-        changesDetected: false,
+    if (existingCLICheck.success && existingCLICheck.output?.includes('opencode')) {
+      // CLI already installed, skip installation
+      if (logger) {
+        await logger.info('OpenCode CLI already installed, skipping installation')
       }
-    }
+    } else {
+      // Install OpenCode using the official npm package
+      // Installing OpenCode CLI
+      if (logger) {
+        await logger.info('Installing OpenCode CLI...')
+      }
 
-    console.log('OpenCode CLI installed successfully')
-    if (logger) {
-      await logger.success('OpenCode CLI installed successfully')
+      installResult = await runAndLogCommand(sandbox, 'npm', ['install', '-g', 'opencode-ai'], logger)
+
+      if (!installResult.success) {
+        console.error('OpenCode CLI installation failed:', { error: installResult.error })
+        return {
+          success: false,
+          error: `Failed to install OpenCode CLI: ${installResult.error || 'Unknown error'}`,
+          cliName: 'opencode',
+          changesDetected: false,
+        }
+      }
+
+      console.log('OpenCode CLI installed successfully')
+      if (logger) {
+        await logger.success('OpenCode CLI installed successfully')
+      }
     }
 
     // Verify OpenCode CLI is available
@@ -94,7 +112,7 @@ export async function executeOpenCodeInSandbox(
 
       if (npmBinCheck.success && npmBinCheck.output) {
         const globalBinPath = npmBinCheck.output.trim()
-        console.log(`Global npm bin path: ${globalBinPath}`)
+        console.log('Global npm bin path retrieved')
 
         // Try running opencode from the global bin path
         const directPathCheck = await runAndLogCommand(
@@ -126,6 +144,94 @@ export async function executeOpenCodeInSandbox(
     console.log('OpenCode CLI verified successfully')
     if (logger) {
       await logger.success('OpenCode CLI verified successfully')
+    }
+
+    // Configure MCP servers if provided
+    if (mcpServers && mcpServers.length > 0) {
+      await logger.info('Configuring MCP servers')
+
+      // Create OpenCode opencode.json configuration file
+      const opencodeConfig: {
+        $schema: string
+        mcp: Record<
+          string,
+          | { type: 'local'; command: string[]; enabled: boolean; environment?: Record<string, string> }
+          | { type: 'remote'; url: string; enabled: boolean; headers?: Record<string, string> }
+        >
+      } = {
+        $schema: 'https://opencode.ai/config.json',
+        mcp: {},
+      }
+
+      for (const server of mcpServers) {
+        const serverName = server.name.toLowerCase().replace(/[^a-z0-9]/g, '-')
+
+        if (server.type === 'local') {
+          // Local MCP server - parse command string into executable and args
+          const commandParts = server.command!.trim().split(/\s+/)
+
+          // Parse env from JSON string if present
+          let envObject: Record<string, string> | undefined
+          if (server.env) {
+            try {
+              envObject = JSON.parse(server.env)
+            } catch (e) {
+              await logger.info('Warning: Failed to parse env for MCP server')
+            }
+          }
+
+          opencodeConfig.mcp[serverName] = {
+            type: 'local',
+            command: commandParts,
+            enabled: true,
+            ...(envObject ? { environment: envObject } : {}),
+          }
+
+          await logger.info('Added local MCP server')
+        } else {
+          // Remote MCP server
+          opencodeConfig.mcp[serverName] = {
+            type: 'remote',
+            url: server.baseUrl!,
+            enabled: true,
+          }
+
+          // Build headers object
+          const headers: Record<string, string> = {}
+          if (server.oauthClientSecret) {
+            headers.Authorization = `Bearer ${server.oauthClientSecret}`
+          }
+          if (server.oauthClientId) {
+            headers['X-Client-ID'] = server.oauthClientId
+          }
+          if (Object.keys(headers).length > 0) {
+            opencodeConfig.mcp[serverName].headers = headers
+          }
+
+          await logger.info('Added remote MCP server')
+        }
+      }
+
+      // Write the opencode.json file to the OpenCode config directory (not project directory)
+      const opencodeConfigJson = JSON.stringify(opencodeConfig, null, 2)
+      const createConfigCmd = `mkdir -p ~/.opencode && cat > ~/.opencode/config.json << 'EOF'
+${opencodeConfigJson}
+EOF`
+
+      await logger.info('Creating OpenCode MCP configuration file...')
+      const configResult = await runCommandInSandbox(sandbox, 'sh', ['-c', createConfigCmd])
+
+      if (configResult.success) {
+        await logger.info('OpenCode configuration file (~/.opencode/config.json) created successfully')
+
+        // Verify the file was created (without logging sensitive contents)
+        const verifyConfig = await runCommandInSandbox(sandbox, 'test', ['-f', '~/.opencode/config.json'])
+        if (verifyConfig.success) {
+          await logger.info('OpenCode MCP configuration verified')
+        }
+      } else {
+        await logger.info('Warning: Failed to create OpenCode configuration file')
+      }
     }
 
     // Set up authentication for OpenCode
@@ -212,7 +318,7 @@ export async function executeOpenCodeInSandbox(
     if (logger) {
       await logger.info('Executing OpenCode run command in non-interactive mode...')
       if (selectedModel) {
-        await logger.info(`Using selected model: ${selectedModel}`)
+        await logger.info('Using selected model')
       }
     }
 
@@ -220,7 +326,24 @@ export async function executeOpenCodeInSandbox(
     // This command allows us to pass a prompt directly and get results without the TUI
     // Add model parameter if provided
     const modelFlag = selectedModel ? ` --model "${selectedModel}"` : ''
-    const fullCommand = `${envPrefix} ${opencodeCmdToUse} run${modelFlag} "${instruction}"`
+
+    // Add session resumption flags if resuming
+    let sessionFlags = ''
+    if (isResumed) {
+      if (sessionId) {
+        sessionFlags = ` --session "${sessionId}"`
+        if (logger) {
+          await logger.info('Resuming specific OpenCode session')
+        }
+      } else {
+        sessionFlags = ' --continue'
+        if (logger) {
+          await logger.info('Continuing last OpenCode session')
+        }
+      }
+    }
+
+    const fullCommand = `${envPrefix} ${opencodeCmdToUse} run${modelFlag}${sessionFlags} "${instruction}"`
 
     // Log the command we're about to execute (with redacted API keys)
     const redactedCommand = fullCommand.replace(/API_KEY="[^"]*"/g, 'API_KEY="[REDACTED]"')
@@ -251,6 +374,18 @@ export async function executeOpenCodeInSandbox(
 
     // OpenCode execution completed
 
+    // Extract session ID from output if present (for resumption)
+    let extractedSessionId: string | undefined
+    try {
+      // Look for session ID in output (format may vary)
+      const sessionMatch = stdout?.match(/(?:session[_\s-]?id|Session)[:\s]+([a-f0-9-]+)/i)
+      if (sessionMatch) {
+        extractedSessionId = sessionMatch[1]
+      }
+    } catch {
+      // Ignore parsing errors
+    }
+
     // Check if any files were modified by OpenCode
     const gitStatusCheck = await runAndLogCommand(sandbox, 'git', ['status', '--porcelain'], logger)
     const hasChanges = gitStatusCheck.success && gitStatusCheck.output?.trim()
@@ -265,7 +400,7 @@ export async function executeOpenCodeInSandbox(
       if (hasChanges) {
         console.log('OpenCode made changes to files:', hasChanges)
         if (logger) {
-          await logger.info(`Files changed: ${hasChanges}`)
+          await logger.info('Files checked for changes')
         }
       }
 
@@ -276,6 +411,7 @@ export async function executeOpenCodeInSandbox(
         cliName: 'opencode',
         changesDetected: !!hasChanges,
         error: undefined,
+        sessionId: extractedSessionId, // Include session ID for resumption
       }
     } else {
       const errorMsg = `OpenCode failed (exit code ${executeResult.exitCode}): ${stderr || stdout || 'No error message'}`
@@ -289,6 +425,7 @@ export async function executeOpenCodeInSandbox(
         agentResponse: stdout,
         cliName: 'opencode',
         changesDetected: !!hasChanges,
+        sessionId: extractedSessionId, // Include session ID even on failure
       }
     }
   } catch (error: unknown) {

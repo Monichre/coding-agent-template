@@ -5,28 +5,33 @@ import { TaskSidebar } from '@/components/task-sidebar'
 import { Task } from '@/lib/db/schema'
 import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
-import { Plus } from 'lucide-react'
+import { Card, CardContent } from '@/components/ui/card'
+import { Plus, Trash2 } from 'lucide-react'
 import Link from 'next/link'
 import { getSidebarWidth, setSidebarWidth, getSidebarOpen, setSidebarOpen } from '@/lib/utils/cookies'
 import { nanoid } from 'nanoid'
+import { ConnectorsProvider } from '@/components/connectors-provider'
 
 interface AppLayoutProps {
   children: React.ReactNode
   initialSidebarWidth?: number
   initialSidebarOpen?: boolean
+  initialIsMobile?: boolean
 }
 
 interface TasksContextType {
   refreshTasks: () => Promise<void>
   toggleSidebar: () => void
   isSidebarOpen: boolean
+  isSidebarResizing: boolean
   addTaskOptimistically: (taskData: {
     prompt: string
     repoUrl: string
     selectedAgent: string
     selectedModel: string
+    installDependencies: boolean
+    maxDuration: number
   }) => { id: string; optimisticTask: Task }
-  removeTaskOptimistically: (taskId: string) => void
 }
 
 const TasksContext = createContext<TasksContextType | undefined>(undefined)
@@ -41,44 +46,52 @@ export const useTasks = () => {
 
 function SidebarLoader({ width }: { width: number }) {
   return (
-    <div className="h-full border-r bg-muted p-3 overflow-y-auto" style={{ width: `${width}px` }}>
-      <div className="mb-3">
+    <div
+      className="h-full border-r bg-muted px-2 md:px-3 pb-3 pt-3 md:pt-5.5 overflow-y-auto"
+      style={{ width: `${width}px` }}
+    >
+      <div className="mb-3 md:mb-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-base font-semibold">Loading Tasks...</h2>
-          <Link href="/">
-            <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
-              <Plus className="h-4 w-4" />
+          <h2 className="text-sm md:text-base font-semibold pl-3">Tasks</h2>
+          <div className="flex items-center gap-1">
+            <Button variant="ghost" size="sm" className="h-8 w-8 p-0" disabled={true} title="Delete Tasks">
+              <Trash2 className="h-4 w-4" />
             </Button>
-          </Link>
+            <Link href="/">
+              <Button variant="ghost" size="sm" className="h-8 w-8 p-0" title="New Task">
+                <Plus className="h-4 w-4" />
+              </Button>
+            </Link>
+          </div>
         </div>
       </div>
 
-      <div className="space-y-1.5">
+      <div className="space-y-1">
         {/* Loading skeleton for tasks */}
-        {Array.from({ length: 8 }).map((_, i) => (
-          <div key={i} className="border rounded-lg p-2 h-[68px] flex flex-col justify-center">
-            <div className="flex items-center gap-2 mb-0.5">
-              <div className="w-4 h-4 bg-muted animate-pulse rounded-full"></div>
-              <div className="h-3 bg-muted animate-pulse rounded flex-1"></div>
-            </div>
-            <div className="h-3 bg-muted animate-pulse rounded ml-6 w-3/4"></div>
-          </div>
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Card key={i} className="animate-pulse h-[70px] rounded-lg">
+            <CardContent className="px-3 py-2">{/* Empty skeleton - just the card shape */}</CardContent>
+          </Card>
         ))}
       </div>
     </div>
   )
 }
 
-export function AppLayout({ children, initialSidebarWidth, initialSidebarOpen }: AppLayoutProps) {
+export function AppLayout({ children, initialSidebarWidth, initialSidebarOpen, initialIsMobile }: AppLayoutProps) {
   const [tasks, setTasks] = useState<Task[]>([])
   const [isLoading, setIsLoading] = useState(true)
+  // Initialize sidebar state based on user agent and preferences
+  // On mobile (from user agent): always closed
+  // On desktop: use saved preference or default to open
   const [isSidebarOpen, setIsSidebarOpen] = useState(() => {
-    // Always use the server-provided value initially to avoid hydration mismatch
-    return initialSidebarOpen ?? false
+    if (initialIsMobile) return false
+    return initialSidebarOpen ?? true
   })
   const [sidebarWidth, setSidebarWidthState] = useState(initialSidebarWidth || getSidebarWidth())
   const [isResizing, setIsResizing] = useState(false)
-  const [isDesktop, setIsDesktop] = useState(() => typeof window !== 'undefined' && window.innerWidth >= 1024)
+  const [isDesktop, setIsDesktop] = useState(!initialIsMobile)
+  const [hasMounted, setHasMounted] = useState(false)
   const router = useRouter()
 
   // Update sidebar width and save to cookie
@@ -96,27 +109,28 @@ export function AppLayout({ children, initialSidebarWidth, initialSidebarOpen }:
     }
   }, [])
 
-  // Ensure isDesktop is correct after hydration and set proper sidebar state
+  // Verify screen size after mount and update if needed
   useEffect(() => {
-    const newIsDesktop = window.innerWidth >= 1024
-    setIsDesktop(newIsDesktop)
+    const actualIsDesktop = window.innerWidth >= 1024
 
-    // On mobile, always close sidebar after hydration
-    if (!newIsDesktop) {
-      setIsSidebarOpen(false)
-    } else {
-      // On desktop, check if there's a saved preference, otherwise default to open
-      const hasCookie = document.cookie.includes('sidebar-open')
-      if (hasCookie) {
-        const cookieValue = getSidebarOpen()
-        setIsSidebarOpen(cookieValue)
-      } else {
-        // No cookie exists, default to open on desktop
-        setIsSidebarOpen(true)
-        setSidebarOpen(true) // Save the default preference
+    // Only update if there's a mismatch between user agent detection and actual screen size
+    if (actualIsDesktop !== isDesktop) {
+      setIsDesktop(actualIsDesktop)
+
+      if (!actualIsDesktop) {
+        // Screen is actually mobile but user agent said desktop
+        setIsSidebarOpen(false)
+      } else if (actualIsDesktop && initialIsMobile) {
+        // Screen is actually desktop but user agent said mobile
+        // Use saved preference or default to open
+        const savedPreference = getSidebarOpen()
+        setIsSidebarOpen(savedPreference ?? initialSidebarOpen ?? true)
       }
     }
-  }, [])
+
+    // Mark as mounted to enable transitions
+    setHasMounted(true)
+  }, [isDesktop, initialIsMobile, initialSidebarOpen])
 
   // Fetch tasks on component mount
   useEffect(() => {
@@ -170,10 +184,13 @@ export function AppLayout({ children, initialSidebarWidth, initialSidebarOpen }:
       if (response.ok) {
         const data = await response.json()
         setTasks(data.tasks)
-        setIsLoading(false)
+      } else if (response.status === 401) {
+        // User is not authenticated, show empty tasks
+        setTasks([])
       }
     } catch (error) {
       console.error('Error fetching tasks:', error)
+    } finally {
       setIsLoading(false)
     }
   }
@@ -191,35 +208,44 @@ export function AppLayout({ children, initialSidebarWidth, initialSidebarOpen }:
     repoUrl: string
     selectedAgent: string
     selectedModel: string
+    installDependencies: boolean
+    maxDuration: number
   }) => {
     const id = nanoid()
     const optimisticTask: Task = {
       id,
+      userId: 'temp', // Temporary value, will be replaced by server
       prompt: taskData.prompt,
       repoUrl: taskData.repoUrl,
       selectedAgent: taskData.selectedAgent,
       selectedModel: taskData.selectedModel,
-      installDependencies: null,
-      maxDuration: null,
+      installDependencies: taskData.installDependencies,
+      maxDuration: taskData.maxDuration,
+      keepAlive: false,
       status: 'pending',
       progress: 0,
       logs: [],
       error: null,
       branchName: null,
+      sandboxId: null,
+      agentSessionId: null,
       sandboxUrl: null,
+      previewUrl: null,
+      mcpServerIds: null,
+      prUrl: null,
+      prNumber: null,
+      prStatus: null,
+      prMergeCommitSha: null,
       createdAt: new Date(),
       updatedAt: new Date(),
       completedAt: null,
+      deletedAt: null,
     }
 
     // Add the optimistic task to the beginning of the tasks array
     setTasks((prevTasks) => [optimisticTask, ...prevTasks])
 
     return { id, optimisticTask }
-  }
-
-  const removeTaskOptimistically = (taskId: string) => {
-    setTasks((prevTasks) => prevTasks.filter((task) => task.id !== taskId))
   }
 
   const closeSidebar = () => {
@@ -269,76 +295,78 @@ export function AppLayout({ children, initialSidebarWidth, initialSidebarOpen }:
         refreshTasks: fetchTasks,
         toggleSidebar,
         isSidebarOpen,
+        isSidebarResizing: isResizing,
         addTaskOptimistically,
-        removeTaskOptimistically,
       }}
     >
-      <div
-        className="h-screen flex relative"
-        style={
-          {
-            '--sidebar-width': `${sidebarWidth}px`,
-            '--sidebar-open': isSidebarOpen ? '1' : '0',
-          } as React.CSSProperties
-        }
-        suppressHydrationWarning
-      >
-        {/* Backdrop - Mobile Only */}
-        {isSidebarOpen && <div className="lg:hidden fixed inset-0 bg-black/50 z-30" onClick={closeSidebar} />}
-
-        {/* Sidebar */}
+      <ConnectorsProvider>
         <div
-          className={`
+          className="h-dvh flex relative"
+          style={
+            {
+              '--sidebar-width': `${sidebarWidth}px`,
+              '--sidebar-open': isSidebarOpen ? '1' : '0',
+            } as React.CSSProperties
+          }
+          suppressHydrationWarning
+        >
+          {/* Backdrop - Mobile Only */}
+          {isSidebarOpen && <div className="lg:hidden fixed inset-0 bg-black/50 z-30" onClick={closeSidebar} />}
+
+          {/* Sidebar */}
+          <div
+            className={`
             fixed inset-y-0 left-0 z-40
-            ${isResizing ? '' : 'transition-all duration-300 ease-in-out'}
+            ${isResizing || !hasMounted ? '' : 'transition-all duration-300 ease-in-out'}
             ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}
             ${isSidebarOpen ? 'pointer-events-auto' : 'pointer-events-none'}
           `}
-          style={{
-            width: `${sidebarWidth}px`,
-          }}
-        >
-          <div
-            className="h-full overflow-hidden"
             style={{
               width: `${sidebarWidth}px`,
             }}
           >
-            {isLoading ? (
-              <SidebarLoader width={sidebarWidth} />
-            ) : (
-              <TaskSidebar tasks={tasks} onTaskSelect={handleTaskSelect} width={sidebarWidth} />
-            )}
+            <div
+              className="h-full overflow-hidden"
+              style={{
+                width: `${sidebarWidth}px`,
+              }}
+            >
+              {isLoading ? (
+                <SidebarLoader width={sidebarWidth} />
+              ) : (
+                <TaskSidebar tasks={tasks} onTaskSelect={handleTaskSelect} width={sidebarWidth} />
+              )}
+            </div>
           </div>
-        </div>
 
-        {/* Resize Handle - Desktop Only, when sidebar is open */}
-        <div
-          className={`
-            hidden lg:block fixed inset-y-0 cursor-col-resize group z-41 hover:bg-primary/20
-            ${isResizing ? '' : 'transition-all duration-300 ease-in-out'}
+          {/* Resize Handle - Desktop Only, when sidebar is open */}
+          <div
+            className={`
+            hidden lg:block fixed inset-y-0 cursor-col-resize group z-50 hover:bg-primary/20
+            ${isResizing || !hasMounted ? '' : 'transition-all duration-300 ease-in-out'}
             ${isSidebarOpen ? 'w-1 opacity-100' : 'w-0 opacity-0'}
           `}
-          onMouseDown={isSidebarOpen ? handleMouseDown : undefined}
-          style={{
-            // Position it right after the sidebar
-            left: isSidebarOpen ? `${sidebarWidth}px` : '0px',
-          }}
-        >
-          <div className="absolute inset-0 w-2 -ml-0.5" />
-          <div className="absolute inset-y-0 left-0 w-0.5 bg-primary/50 opacity-0 group-hover:opacity-100 transition-opacity" />
-        </div>
+            onMouseDown={isSidebarOpen ? handleMouseDown : undefined}
+            style={{
+              // Position it right after the sidebar
+              left: isSidebarOpen ? `${sidebarWidth}px` : '0px',
+            }}
+          >
+            <div className="absolute inset-0 w-2 -ml-0.5" />
+            <div className="absolute inset-y-0 left-0 w-0.5 bg-primary/50 opacity-0 group-hover:opacity-100 transition-opacity" />
+          </div>
 
-        {/* Main Content */}
-        <div
-          className={`flex-1 overflow-auto flex flex-col lg:ml-0 ${isResizing ? '' : 'transition-all duration-300 ease-in-out'}`}
-          style={{
-            marginLeft: isSidebarOpen ? `${sidebarWidth + 4}px` : '0px',
-          }}
-        >
-          {children}
+          {/* Main Content */}
+          <div
+            className={`flex-1 overflow-auto flex flex-col ${isResizing || !hasMounted ? '' : 'transition-all duration-300 ease-in-out'}`}
+            style={{
+              marginLeft: isDesktop && isSidebarOpen ? `${sidebarWidth + 4}px` : '0px',
+            }}
+          >
+            {children}
+          </div>
         </div>
-      </div>
+      </ConnectorsProvider>
     </TasksContext.Provider>
   )
 }

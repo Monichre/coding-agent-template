@@ -1,22 +1,41 @@
 import { NextRequest, NextResponse, after } from 'next/server'
 import { Sandbox } from '@vercel/sandbox'
 import { db } from '@/lib/db/client'
-import { tasks, insertTaskSchema } from '@/lib/db/schema'
+import { tasks, insertTaskSchema, connectors, taskMessages } from '@/lib/db/schema'
 import { generateId } from '@/lib/utils/id'
 import { createSandbox } from '@/lib/sandbox/creation'
 import { executeAgentInSandbox, AgentType } from '@/lib/sandbox/agents'
 import { pushChangesToBranch, shutdownSandbox } from '@/lib/sandbox/git'
-import { registerSandbox, unregisterSandbox } from '@/lib/sandbox/sandbox-registry'
-import { eq, desc, or } from 'drizzle-orm'
-import { createInfoLog } from '@/lib/utils/logging'
+import { unregisterSandbox } from '@/lib/sandbox/sandbox-registry'
+import { detectPackageManager } from '@/lib/sandbox/package-manager'
+import { runCommandInSandbox } from '@/lib/sandbox/commands'
+import { eq, desc, or, and, isNull } from 'drizzle-orm'
 import { createTaskLogger } from '@/lib/utils/task-logger'
 import { generateBranchName, createFallbackBranchName } from '@/lib/utils/branch-name-generator'
-import { shouldQueueTask, updateQueuePositions, processQueue } from '@/lib/queue/task-queue'
+import { decrypt } from '@/lib/crypto'
+import { getServerSession } from '@/lib/session/get-server-session'
+import { getUserGitHubToken } from '@/lib/github/user-token'
+import { getGitHubUser } from '@/lib/github/client'
+import { getUserApiKeys } from '@/lib/api-keys/user-keys'
+import { checkRateLimit } from '@/lib/utils/rate-limit'
+import { MAX_SANDBOX_DURATION } from '@/lib/constants'
 
 export async function GET() {
   try {
-    const allTasks = await db.select().from(tasks).orderBy(desc(tasks.createdAt))
-    return NextResponse.json({ tasks: allTasks })
+    // Get user session
+    const session = await getServerSession()
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+
+    // Get tasks for this user only (exclude soft-deleted tasks)
+    const userTasks = await db
+      .select()
+      .from(tasks)
+      .where(and(eq(tasks.userId, session.user.id), isNull(tasks.deletedAt)))
+      .orderBy(desc(tasks.createdAt))
+
+    return NextResponse.json({ tasks: userTasks })
   } catch (error) {
     console.error('Error fetching tasks:', error)
     return NextResponse.json({ error: 'Failed to fetch tasks' }, { status: 500 })
@@ -25,19 +44,36 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
+    // Get user session
+    const session = await getServerSession()
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+
+    // Check rate limit
+    const rateLimit = await checkRateLimit(session.user.id)
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        {
+          error: 'Rate limit exceeded',
+          message: `You have reached the daily limit of ${rateLimit.total} messages (tasks + follow-ups). Your limit will reset at ${rateLimit.resetAt.toISOString()}`,
+          remaining: rateLimit.remaining,
+          total: rateLimit.total,
+          resetAt: rateLimit.resetAt.toISOString(),
+        },
+        { status: 429 },
+      )
+    }
+
     const body = await request.json()
 
     // Use provided ID or generate a new one
     const taskId = body.id || generateId(12)
-
-    // Check if we should queue this task
-    const { shouldQueue, queuePosition } = await shouldQueueTask()
-
     const validatedData = insertTaskSchema.parse({
       ...body,
       id: taskId,
-      status: shouldQueue ? 'queued' : 'pending',
-      queuePosition: shouldQueue ? queuePosition : null,
+      userId: session.user.id,
+      status: 'pending',
       progress: 0,
       logs: [],
     })
@@ -51,90 +87,98 @@ export async function POST(request: NextRequest) {
       })
       .returning()
 
-    // If task is queued, log it
-    if (shouldQueue) {
-      const logger = createTaskLogger(taskId)
-      await logger.info(`Task queued at position ${queuePosition}. Will start when a slot becomes available.`)
-    }
+    // Generate AI branch name after response is sent (non-blocking)
+    after(async () => {
+      try {
+        // Check if AI Gateway API key is available
+        if (!process.env.AI_GATEWAY_API_KEY) {
+          console.log('AI_GATEWAY_API_KEY not available, skipping AI branch name generation')
+          return
+        }
 
-    // Generate AI branch name after response is sent (non-blocking) - only if repo is provided
-    if (validatedData.repoUrl && validatedData.repoUrl.trim() !== '') {
-      after(async () => {
+        const logger = createTaskLogger(taskId)
+        await logger.info('Generating AI-powered branch name...')
+
+        // Extract repository name from URL for context
+        let repoName: string | undefined
         try {
-          // Check if AI Gateway API key is available
-          if (!process.env.AI_GATEWAY_API_KEY) {
-            console.log('AI_GATEWAY_API_KEY not available, skipping AI branch name generation')
-            return
+          const url = new URL(validatedData.repoUrl || '')
+          const pathParts = url.pathname.split('/')
+          if (pathParts.length >= 3) {
+            repoName = pathParts[pathParts.length - 1].replace('.git', '')
           }
+        } catch {
+          // Ignore URL parsing errors
+        }
 
-          const logger = createTaskLogger(taskId)
-          await logger.info('Generating AI-powered branch name...')
+        // Generate AI branch name
+        const aiBranchName = await generateBranchName({
+          description: validatedData.prompt,
+          repoName,
+          context: `${validatedData.selectedAgent} agent task`,
+        })
 
-          // Extract repository name from URL for context
-          let repoName: string | undefined
-          try {
-            const url = new URL(validatedData.repoUrl || '')
-            const pathParts = url.pathname.split('/')
-            if (pathParts.length >= 3) {
-              repoName = pathParts[pathParts.length - 1].replace('.git', '')
-            }
-          } catch {
-            // Ignore URL parsing errors
-          }
-
-          // Generate AI branch name
-          const aiBranchName = await generateBranchName({
-            description: validatedData.prompt,
-            repoName,
-            context: `${validatedData.selectedAgent} agent task`,
+        // Update task with AI-generated branch name
+        await db
+          .update(tasks)
+          .set({
+            branchName: aiBranchName,
+            updatedAt: new Date(),
           })
+          .where(eq(tasks.id, taskId))
 
-          // Update task with AI-generated branch name
+        await logger.success('Generated AI branch name')
+      } catch (error) {
+        console.error('Error generating AI branch name:', error)
+
+        // Fallback to timestamp-based branch name
+        const fallbackBranchName = createFallbackBranchName(taskId)
+
+        try {
           await db
             .update(tasks)
             .set({
-              branchName: aiBranchName,
+              branchName: fallbackBranchName,
               updatedAt: new Date(),
             })
             .where(eq(tasks.id, taskId))
 
-          await logger.success(`Generated AI branch name: ${aiBranchName}`)
-        } catch (error) {
-          console.error('Error generating AI branch name:', error)
-
-          // Fallback to timestamp-based branch name
-          const fallbackBranchName = createFallbackBranchName(taskId)
-
-          try {
-            await db
-              .update(tasks)
-              .set({
-                branchName: fallbackBranchName,
-                updatedAt: new Date(),
-              })
-              .where(eq(tasks.id, taskId))
-
-            const logger = createTaskLogger(taskId)
-            await logger.info(`Using fallback branch name: ${fallbackBranchName}`)
-          } catch (dbError) {
-            console.error('Error updating task with fallback branch name:', dbError)
-          }
+          const logger = createTaskLogger(taskId)
+          await logger.info('Using fallback branch name')
+        } catch (dbError) {
+          console.error('Error updating task with fallback branch name:', dbError)
         }
-      })
-    }
+      }
+    })
 
-    // Only process the task immediately if it's not queued
-    if (!shouldQueue) {
-      processTaskWithTimeout(
-        newTask.id,
-        validatedData.prompt,
-        validatedData.repoUrl || '',
-        validatedData.selectedAgent || 'claude',
-        validatedData.selectedModel,
-        validatedData.installDependencies || false,
-        validatedData.maxDuration || 5,
-      )
-    }
+    // Get user's API keys, GitHub token, and GitHub user info BEFORE entering after() block (where session is not accessible)
+    const userApiKeys = await getUserApiKeys()
+    const userGithubToken = await getUserGitHubToken()
+    const githubUser = await getGitHubUser()
+
+    // Process the task asynchronously with timeout
+    // CRITICAL: Wrap in after() to ensure Vercel doesn't kill the function after response
+    // Without this, serverless functions terminate immediately after sending the response
+    after(async () => {
+      try {
+        await processTaskWithTimeout(
+          newTask.id,
+          validatedData.prompt,
+          validatedData.repoUrl || '',
+          validatedData.selectedAgent || 'claude',
+          validatedData.selectedModel,
+          validatedData.installDependencies || false,
+          validatedData.maxDuration || MAX_SANDBOX_DURATION,
+          validatedData.keepAlive || false,
+          userApiKeys,
+          userGithubToken,
+          githubUser,
+        )
+      } catch (error) {
+        console.error('Task processing failed:', error)
+        // Error handling is already done inside processTaskWithTimeout
+      }
+    })
 
     return NextResponse.json({ task: newTask })
   } catch (error) {
@@ -150,7 +194,21 @@ async function processTaskWithTimeout(
   selectedAgent: string = 'claude',
   selectedModel?: string,
   installDependencies: boolean = false,
-  maxDuration: number = 5,
+  maxDuration: number = MAX_SANDBOX_DURATION,
+  keepAlive: boolean = false,
+  apiKeys?: {
+    OPENAI_API_KEY?: string
+    GEMINI_API_KEY?: string
+    CURSOR_API_KEY?: string
+    ANTHROPIC_API_KEY?: string
+    AI_GATEWAY_API_KEY?: string
+  },
+  githubToken?: string | null,
+  githubUser?: {
+    username: string
+    name: string | null
+    email: string | null
+  } | null,
 ) {
   const TASK_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes in milliseconds
 
@@ -175,7 +233,19 @@ async function processTaskWithTimeout(
 
   try {
     await Promise.race([
-      processTask(taskId, prompt, repoUrl, selectedAgent, selectedModel, installDependencies, maxDuration),
+      processTask(
+        taskId,
+        prompt,
+        repoUrl,
+        selectedAgent,
+        selectedModel,
+        installDependencies,
+        maxDuration,
+        keepAlive,
+        apiKeys,
+        githubToken,
+        githubUser,
+      ),
       timeoutPromise,
     ])
 
@@ -241,15 +311,50 @@ async function processTask(
   selectedAgent: string = 'claude',
   selectedModel?: string,
   installDependencies: boolean = false,
-  maxDuration: number = 5,
+  maxDuration: number = MAX_SANDBOX_DURATION,
+  keepAlive: boolean = false,
+  apiKeys?: {
+    OPENAI_API_KEY?: string
+    GEMINI_API_KEY?: string
+    CURSOR_API_KEY?: string
+    ANTHROPIC_API_KEY?: string
+    AI_GATEWAY_API_KEY?: string
+  },
+  githubToken?: string | null,
+  githubUser?: {
+    username: string
+    name: string | null
+    email: string | null
+  } | null,
 ) {
   let sandbox: Sandbox | null = null
   const logger = createTaskLogger(taskId)
+  const taskStartTime = Date.now()
 
   try {
+    console.log('Starting task processing')
+
     // Update task status to processing with real-time logging
     await logger.updateStatus('processing', 'Task created, preparing to start...')
     await logger.updateProgress(10, 'Initializing task execution...')
+
+    // Save the user's message
+    try {
+      await db.insert(taskMessages).values({
+        id: generateId(12),
+        taskId,
+        role: 'user',
+        content: prompt,
+      })
+    } catch (error) {
+      console.error('Failed to save user message:', error)
+    }
+
+    // GitHub token and API keys are passed as parameters (retrieved before entering after() block)
+    if (githubToken) {
+      await logger.info('Using authenticated GitHub access')
+    }
+    await logger.info('API keys configured for selected agent')
 
     // Check if task was stopped before we even start
     if (await isTaskStopped(taskId)) {
@@ -257,33 +362,33 @@ async function processTask(
       return
     }
 
-    // Wait for AI-generated branch name (with timeout) - only if repo is provided
-    const hasRepo = repoUrl && repoUrl.trim() !== ''
-    let aiBranchName: string | null = null
+    // Wait for AI-generated branch name (with timeout)
+    const aiBranchName = await waitForBranchName(taskId, 10000)
 
-    if (hasRepo) {
-      aiBranchName = await waitForBranchName(taskId, 10000)
-
-      // Check if task was stopped during branch name generation
-      if (await isTaskStopped(taskId)) {
-        await logger.info('Task was stopped during branch name generation')
-        return
-      }
-
-      if (aiBranchName) {
-        await logger.info(`Using AI-generated branch name: ${aiBranchName}`)
-      } else {
-        await logger.info('AI branch name not ready, will use fallback during sandbox creation')
-      }
+    // Check if task was stopped during branch name generation
+    if (await isTaskStopped(taskId)) {
+      await logger.info('Task was stopped during branch name generation')
+      return
     }
 
-    await logger.updateProgress(15, 'Creating sandbox environment...')
+    if (aiBranchName) {
+      await logger.info('Using AI-generated branch name')
+    } else {
+      await logger.info('AI branch name not ready, will use fallback during sandbox creation')
+    }
+
+    await logger.updateProgress(15, 'Creating sandbox environment')
+    console.log('Creating sandbox')
 
     // Create sandbox with progress callback and 5-minute timeout
     const sandboxResult = await createSandbox(
       {
         taskId,
         repoUrl,
+        githubToken,
+        gitAuthorName: githubUser?.name || githubUser?.username || 'Coding Agent',
+        gitAuthorEmail: githubUser?.username ? `${githubUser.username}@users.noreply.github.com` : 'agent@example.com',
+        apiKeys,
         timeout: `${maxDuration}m`,
         ports: [3000],
         runtime: 'node22',
@@ -292,6 +397,7 @@ async function processTask(
         selectedAgent,
         selectedModel,
         installDependencies,
+        keepAlive,
         preDeterminedBranchName: aiBranchName || undefined,
         onProgress: async (progress: number, message: string) => {
           // Use real-time logger for progress updates
@@ -330,15 +436,17 @@ async function processTask(
 
     const { sandbox: createdSandbox, domain, branchName } = sandboxResult
     sandbox = createdSandbox || null
+    console.log('Sandbox created successfully')
 
-    // Update sandbox URL and branch name (only update branch name if not already set by AI and if repo exists)
-    const updateData: { sandboxUrl?: string; updatedAt: Date; branchName?: string } = {
+    // Update sandbox URL, sandbox ID, and branch name (only update branch name if not already set by AI)
+    const updateData: { sandboxUrl?: string; sandboxId?: string; updatedAt: Date; branchName?: string } = {
+      sandboxId: sandbox?.sandboxId || undefined,
       sandboxUrl: domain || undefined,
       updatedAt: new Date(),
     }
 
-    // Only update branch name if we don't already have an AI-generated one and we have a repo
-    if (hasRepo && !aiBranchName && branchName) {
+    // Only update branch name if we don't already have an AI-generated one
+    if (!aiBranchName) {
       updateData.branchName = branchName
     }
 
@@ -351,7 +459,8 @@ async function processTask(
     }
 
     // Log agent execution start
-    await logger.updateProgress(50, `Installing and executing ${selectedAgent} agent...`)
+    await logger.updateProgress(50, 'Installing and executing agent')
+    console.log('Starting agent execution')
 
     // Execute selected agent with timeout (different timeouts per agent)
     const getAgentTimeout = (agent: string) => {
@@ -379,63 +488,179 @@ async function processTask(
       throw new Error('Sandbox is not available for agent execution')
     }
 
+    type Connector = typeof connectors.$inferSelect
+
+    let mcpServers: Connector[] = []
+
+    try {
+      // Get current user session to filter connectors
+      const session = await getServerSession()
+
+      if (session?.user?.id) {
+        const userConnectors = await db
+          .select()
+          .from(connectors)
+          .where(and(eq(connectors.userId, session.user.id), eq(connectors.status, 'connected')))
+
+        mcpServers = userConnectors.map((connector: Connector) => {
+          // Decrypt sensitive fields
+          const decryptedEnv = connector.env ? JSON.parse(decrypt(connector.env)) : null
+          return {
+            ...connector,
+            env: decryptedEnv,
+            oauthClientSecret: connector.oauthClientSecret ? decrypt(connector.oauthClientSecret) : null,
+          }
+        })
+
+        if (mcpServers.length > 0) {
+          await logger.info('Found connected MCP servers')
+
+          // Store MCP server IDs in the task
+          await db
+            .update(tasks)
+            .set({
+              mcpServerIds: JSON.parse(JSON.stringify(mcpServers.map((s) => s.id))),
+              updatedAt: new Date(),
+            })
+            .where(eq(tasks.id, taskId))
+        } else {
+          await logger.info('No connected MCP servers found for current user')
+        }
+      } else {
+        await logger.info('No user session found, continuing without MCP servers')
+      }
+    } catch (mcpError) {
+      console.error('Failed to fetch MCP servers:', mcpError)
+      await logger.info('Warning: Could not fetch MCP servers, continuing without them')
+    }
+
+    // Sanitize prompt to prevent CLI option parsing issues
+    const sanitizedPrompt = prompt
+      .replace(/`/g, "'") // Replace backticks with single quotes
+      .replace(/\$/g, '') // Remove dollar signs
+      .replace(/\\/g, '') // Remove backslashes
+      .replace(/^-/gm, ' -') // Prefix lines starting with dash to avoid CLI option parsing
+
+    // Generate agent message ID for streaming updates
+    const agentMessageId = generateId()
+
     const agentResult = await Promise.race([
-      executeAgentInSandbox(sandbox, prompt, selectedAgent as AgentType, logger, selectedModel),
+      executeAgentInSandbox(
+        sandbox,
+        sanitizedPrompt,
+        selectedAgent as AgentType,
+        logger,
+        selectedModel,
+        mcpServers,
+        undefined,
+        apiKeys,
+        undefined, // isResumed
+        undefined, // sessionId
+        taskId, // taskId for streaming updates
+        agentMessageId, // agentMessageId for streaming updates
+      ),
       agentTimeoutPromise,
     ])
 
+    console.log('Agent execution completed')
+
+    // Update agent session ID if provided (for Cursor agent resumption)
+    if (agentResult.sessionId) {
+      await db.update(tasks).set({ agentSessionId: agentResult.sessionId }).where(eq(tasks.id, taskId))
+    }
+
     if (agentResult.success) {
       // Log agent completion
-      await logger.success(`${selectedAgent} agent execution completed`)
-      await logger.info(agentResult.output || 'Code changes applied successfully')
+      await logger.success('Agent execution completed')
+      await logger.info('Code changes applied successfully')
 
       if (agentResult.agentResponse) {
-        await logger.info(`Agent Response: ${agentResult.agentResponse}`)
+        await logger.info('Agent response received')
+
+        // Save the agent's response message
+        try {
+          await db.insert(taskMessages).values({
+            id: generateId(12),
+            taskId,
+            role: 'agent',
+            content: agentResult.agentResponse,
+          })
+        } catch (error) {
+          console.error('Failed to save agent message:', error)
+        }
       }
 
       // Agent execution logs are already logged in real-time by the agent
       // No need to log them again here
 
-      // Push changes to branch (only if repo was provided)
-      const hasRepo = repoUrl && repoUrl.trim() !== ''
-      if (hasRepo && branchName) {
-        const commitMessage = `${prompt.substring(0, 50)}${prompt.length > 50 ? '...' : ''}`
-        const pushResult = await pushChangesToBranch(sandbox!, branchName, commitMessage, logger)
+      // Push changes to branch
+      const commitMessage = `${prompt.substring(0, 50)}${prompt.length > 50 ? '...' : ''}`
+      const pushResult = await pushChangesToBranch(sandbox!, branchName!, commitMessage, logger)
 
-        // Check if push failed and handle accordingly
-        if (pushResult.pushFailed) {
-          // Unregister and shutdown sandbox
-          unregisterSandbox(taskId)
-          const shutdownResult = await shutdownSandbox(sandbox!)
-          if (shutdownResult.success) {
-            await logger.success('Sandbox shutdown completed')
-          } else {
-            await logger.error(`Sandbox shutdown failed: ${shutdownResult.error}`)
+      // Conditionally shutdown sandbox based on keepAlive setting
+      if (keepAlive) {
+        // Keep sandbox alive for follow-up messages
+        await logger.info('Sandbox kept alive for follow-up messages')
+
+        // Start dev server in background if keepAlive is enabled
+        try {
+          // Check if package.json exists and has a dev script
+          const packageJsonCheck = await runCommandInSandbox(sandbox!, 'test', ['-f', 'package.json'])
+          if (packageJsonCheck.success) {
+            const packageJsonRead = await runCommandInSandbox(sandbox!, 'cat', ['package.json'])
+            if (packageJsonRead.success && packageJsonRead.output) {
+              const packageJson = JSON.parse(packageJsonRead.output)
+              const hasDevScript = packageJson?.scripts?.dev
+
+              if (hasDevScript) {
+                await logger.info('Starting development server')
+
+                // Detect package manager and start dev server
+                const packageManager = await detectPackageManager(sandbox!, logger)
+                const devCommand = packageManager === 'npm' ? 'npm' : packageManager
+                const devArgs = packageManager === 'npm' ? ['run', 'dev'] : ['dev']
+
+                // Start dev server in detached mode (runs in background)
+                await sandbox!.runCommand({
+                  cmd: devCommand,
+                  args: devArgs,
+                  detached: true, // Key: runs in background without blocking
+                })
+
+                await logger.info('Development server started')
+              }
+            }
           }
-
-          await logger.updateStatus('error')
-          await logger.error('Task failed: Unable to push changes to repository')
-          throw new Error('Failed to push changes to repository')
+        } catch (error) {
+          console.error('Failed to start dev server:', error)
+          // Don't log anything to user - just silently skip if no dev script
         }
       } else {
-        await logger.info('No repository specified - skipping git operations')
+        // Unregister and shutdown sandbox
+        unregisterSandbox(taskId)
+        const shutdownResult = await shutdownSandbox(sandbox!)
+        if (shutdownResult.success) {
+          await logger.success('Sandbox shutdown completed')
+        } else {
+          await logger.error('Sandbox shutdown failed')
+        }
       }
 
-      // Unregister and shutdown sandbox
-      unregisterSandbox(taskId)
-      const shutdownResult = await shutdownSandbox(sandbox!)
-      if (shutdownResult.success) {
-        await logger.success('Sandbox shutdown completed')
+      // Check if push failed and handle accordingly
+      if (pushResult.pushFailed) {
+        await logger.updateStatus('error')
+        await logger.error('Task failed: Unable to push changes to repository')
+        throw new Error('Failed to push changes to repository')
       } else {
-        await logger.error(`Sandbox shutdown failed: ${shutdownResult.error}`)
-      }
+        // Update task as completed
+        await logger.updateStatus('completed')
+        await logger.updateProgress(100, 'Task completed successfully')
 
-      // Update task as completed
-      await logger.updateStatus('completed')
-      await logger.updateProgress(100, 'Task completed successfully')
+        console.log('Task completed successfully')
+      }
     } else {
       // Agent failed, but we still want to capture its logs
-      await logger.error(`${selectedAgent} agent execution failed`)
+      await logger.error('Agent execution failed')
 
       // Agent execution logs are already logged in real-time by the agent
       // No need to log them again here
@@ -445,15 +670,20 @@ async function processTask(
   } catch (error) {
     console.error('Error processing task:', error)
 
-    // Try to shutdown sandbox even on error
+    // Try to shutdown sandbox even on error (unless keepAlive is enabled)
     if (sandbox) {
       try {
-        unregisterSandbox(taskId)
-        const shutdownResult = await shutdownSandbox(sandbox)
-        if (shutdownResult.success) {
-          await logger.info('Sandbox shutdown completed after error')
+        if (keepAlive) {
+          // Keep sandbox alive even on error for potential retry
+          await logger.info('Sandbox kept alive despite error')
         } else {
-          await logger.error(`Sandbox shutdown failed: ${shutdownResult.error}`)
+          unregisterSandbox(taskId)
+          const shutdownResult = await shutdownSandbox(sandbox)
+          if (shutdownResult.success) {
+            await logger.info('Sandbox shutdown completed after error')
+          } else {
+            await logger.error('Sandbox shutdown failed')
+          }
         }
       } catch (shutdownError) {
         console.error('Failed to shutdown sandbox after error:', shutdownError)
@@ -464,20 +694,19 @@ async function processTask(
     const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred'
 
     // Log the error and update task status
-    await logger.error(`Error: ${errorMessage}`)
+    await logger.error('Error occurred during task processing')
     await logger.updateStatus('error', errorMessage)
-  } finally {
-    // Process queue after task completes (success or failure)
-    try {
-      await processQueue()
-    } catch (queueError) {
-      console.error('Error processing queue after task completion:', queueError)
-    }
   }
 }
 
 export async function DELETE(request: NextRequest) {
   try {
+    // Check authentication
+    const session = await getServerSession()
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+
     const url = new URL(request.url)
     const action = url.searchParams.get('action')
 
@@ -498,24 +727,25 @@ export async function DELETE(request: NextRequest) {
       )
     }
 
-    // Build the where conditions
-    const conditions = []
+    // Build the where conditions for task status
+    const statusConditions = []
     if (actions.includes('completed')) {
-      conditions.push(eq(tasks.status, 'completed'))
+      statusConditions.push(eq(tasks.status, 'completed'))
     }
     if (actions.includes('failed')) {
-      conditions.push(eq(tasks.status, 'error'))
+      statusConditions.push(eq(tasks.status, 'error'))
     }
     if (actions.includes('stopped')) {
-      conditions.push(eq(tasks.status, 'stopped'))
+      statusConditions.push(eq(tasks.status, 'stopped'))
     }
 
-    if (conditions.length === 0) {
+    if (statusConditions.length === 0) {
       return NextResponse.json({ error: 'No valid actions specified' }, { status: 400 })
     }
 
-    // Delete tasks based on conditions
-    const whereClause = conditions.length === 1 ? conditions[0] : or(...conditions)
+    // Delete tasks based on conditions AND user ownership
+    const statusClause = statusConditions.length === 1 ? statusConditions[0] : or(...statusConditions)
+    const whereClause = and(statusClause, eq(tasks.userId, session.user.id))
     const deletedTasks = await db.delete(tasks).where(whereClause).returning()
 
     // Build response message

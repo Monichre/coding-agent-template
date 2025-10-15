@@ -3,7 +3,17 @@ import { LogEntry } from '@/lib/db/schema'
 
 export interface SandboxConfig {
   taskId: string
-  repoUrl?: string
+  repoUrl: string
+  githubToken?: string | null
+  gitAuthorName?: string
+  gitAuthorEmail?: string
+  apiKeys?: {
+    OPENAI_API_KEY?: string
+    GEMINI_API_KEY?: string
+    CURSOR_API_KEY?: string
+    ANTHROPIC_API_KEY?: string
+    AI_GATEWAY_API_KEY?: string
+  }
   timeout?: string
   ports?: number[]
   runtime?: string
@@ -14,6 +24,7 @@ export interface SandboxConfig {
   selectedAgent?: string
   selectedModel?: string
   installDependencies?: boolean
+  keepAlive?: boolean
   preDeterminedBranchName?: string
   existingBranchName?: string
   onProgress?: (progress: number, message: string) => Promise<void>
@@ -38,4 +49,5 @@ export interface AgentExecutionResult {
   error?: string
   streamingLogs?: unknown[]
   logs?: LogEntry[]
+  sessionId?: string // For Cursor agent session resumption
 }

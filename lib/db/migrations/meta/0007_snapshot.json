@@ -1,11 +1,11 @@
 {
-  "id": "599a733d-7b3b-4b68-9ef2-d79e2695ada4",
-  "prevId": "ddd9c9b3-d121-415c-a4f4-e820d9416a7a",
+  "id": "6f540154-d47b-40e6-a00d-49a5edfc5f84",
+  "prevId": "94690b89-1d87-42e8-b519-a3ef49556369",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
-    "public.custom_agents": {
-      "name": "custom_agents",
+    "public.connectors": {
+      "name": "connectors",
       "schema": "",
       "columns": {
         "id": {
@@ -24,44 +24,57 @@
           "name": "description",
           "type": "text",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
-        "api_endpoint": {
-          "name": "api_endpoint",
+        "type": {
+          "name": "type",
           "type": "text",
           "primaryKey": false,
-          "notNull": true
+          "notNull": true,
+          "default": "'remote'"
         },
-        "api_key": {
-          "name": "api_key",
+        "base_url": {
+          "name": "base_url",
           "type": "text",
           "primaryKey": false,
           "notNull": false
         },
-        "default_model": {
-          "name": "default_model",
+        "oauth_client_id": {
+          "name": "oauth_client_id",
           "type": "text",
           "primaryKey": false,
           "notNull": false
         },
-        "icon": {
-          "name": "icon",
+        "oauth_client_secret": {
+          "name": "oauth_client_secret",
           "type": "text",
           "primaryKey": false,
           "notNull": false
         },
-        "config_options": {
-          "name": "config_options",
+        "command": {
+          "name": "command",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "args": {
+          "name": "args",
           "type": "jsonb",
           "primaryKey": false,
           "notNull": false
         },
-        "is_active": {
-          "name": "is_active",
-          "type": "boolean",
+        "env": {
+          "name": "env",
+          "type": "jsonb",
           "primaryKey": false,
-          "notNull": false,
-          "default": true
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'disconnected'"
         },
         "created_at": {
           "name": "created_at",
@@ -72,68 +85,6 @@
         },
         "updated_at": {
           "name": "updated_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.generated_images": {
-      "name": "generated_images",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "task_id": {
-          "name": "task_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "prompt": {
-          "name": "prompt",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "image_url": {
-          "name": "image_url",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "model": {
-          "name": "model",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "provider": {
-          "name": "provider",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "metadata": {
-          "name": "metadata",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
           "type": "timestamp",
           "primaryKey": false,
           "notNull": true,
@@ -204,12 +155,6 @@
           "notNull": true,
           "default": "'pending'"
         },
-        "queue_position": {
-          "name": "queue_position",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
         "progress": {
           "name": "progress",
           "type": "integer",
@@ -260,70 +205,6 @@
           "type": "timestamp",
           "primaryKey": false,
           "notNull": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.templates": {
-      "name": "templates",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "description": {
-          "name": "description",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "prompt": {
-          "name": "prompt",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "category": {
-          "name": "category",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "is_default": {
-          "name": "is_default",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": false,
-          "default": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
         }
       },
       "indexes": {},

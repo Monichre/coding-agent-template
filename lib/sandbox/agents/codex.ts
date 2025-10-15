@@ -3,6 +3,9 @@ import { runCommandInSandbox } from '../commands'
 import { AgentExecutionResult } from '../types'
 import { redactSensitiveInfo } from '@/lib/utils/logging'
 import { TaskLogger } from '@/lib/utils/task-logger'
+import { connectors } from '@/lib/db/schema'
+
+type Connector = typeof connectors.$inferSelect
 
 // Helper function to run command and log it
 async function runAndLogCommand(sandbox: Sandbox, command: string, args: string[], logger: TaskLogger) {
@@ -27,24 +30,38 @@ export async function executeCodexInSandbox(
   instruction: string,
   logger: TaskLogger,
   selectedModel?: string,
+  mcpServers?: Connector[],
+  isResumed?: boolean,
+  sessionId?: string,
 ): Promise<AgentExecutionResult> {
   try {
     // Executing Codex CLI with instruction
 
-    // Install Codex CLI using npm
-    // Installing Codex CLI
-    const installResult = await runAndLogCommand(sandbox, 'npm', ['install', '-g', '@openai/codex'], logger)
+    // Check if Codex CLI is already installed (for resumed sandboxes)
+    const existingCLICheck = await runCommandInSandbox(sandbox, 'which', ['codex'])
 
-    if (!installResult.success) {
-      return {
-        success: false,
-        error: `Failed to install Codex CLI: ${installResult.error}`,
-        cliName: 'codex',
-        changesDetected: false,
+    let installResult: { success: boolean; output?: string; error?: string } = { success: true }
+
+    if (existingCLICheck.success && existingCLICheck.output?.includes('codex')) {
+      // CLI already installed, skip installation
+      await logger.info('Codex CLI already installed, skipping installation')
+    } else {
+      // Install Codex CLI using npm
+      // Installing Codex CLI
+      await logger.info('Installing Codex CLI...')
+      installResult = await runAndLogCommand(sandbox, 'npm', ['install', '-g', '@openai/codex'], logger)
+
+      if (!installResult.success) {
+        return {
+          success: false,
+          error: `Failed to install Codex CLI: ${installResult.error}`,
+          cliName: 'codex',
+          changesDetected: false,
+        }
       }
-    }
 
-    // Codex CLI installed successfully
+      await logger.info('Codex CLI installed successfully')
+    }
 
     // Check if Codex CLI is available
     const cliCheck = await runAndLogCommand(sandbox, 'which', ['codex'], logger)
@@ -89,7 +106,7 @@ export async function executeCodexInSandbox(
 
     if (logger) {
       const keyType = isVercelKey ? 'Vercel AI Gateway' : 'OpenAI'
-      await logger.info(`Using ${keyType} API key: ${apiKey.substring(0, 10)}...${apiKey.substring(apiKey.length - 4)}`)
+      await logger.info('Using API key for authentication')
     }
 
     // According to the official Codex CLI docs, we should use 'exec' for non-interactive execution
@@ -124,7 +141,7 @@ export async function executeCodexInSandbox(
     })
 
     if (logger) {
-      await logger.info(`Codex CLI version test: ${versionTestResult.exitCode === 0 ? 'SUCCESS' : 'FAILED'}`)
+      await logger.info('Codex CLI version test completed')
     }
 
     // Create configuration file based on API key type
@@ -164,6 +181,62 @@ log_requests = true
 `
     }
 
+    // Add MCP servers configuration if provided
+    if (mcpServers && mcpServers.length > 0) {
+      await logger.info('Configuring MCP servers')
+
+      // Check if we need experimental RMCP client (for remote servers)
+      const hasRemoteServers = mcpServers.some((s) => s.type === 'remote')
+      if (hasRemoteServers) {
+        configToml = `experimental_use_rmcp_client = true\n\n` + configToml
+      }
+
+      for (const server of mcpServers) {
+        const serverName = server.name.toLowerCase().replace(/[^a-z0-9]/g, '-')
+
+        if (server.type === 'local') {
+          // Local STDIO server - parse command string into command and args
+          const commandParts = server.command!.trim().split(/\s+/)
+          const executable = commandParts[0]
+          const args = commandParts.slice(1)
+
+          configToml += `
+[mcp_servers.${serverName}]
+command = "${executable}"
+`
+          // Add args if provided
+          if (args.length > 0) {
+            configToml += `args = [${args.map((arg) => `"${arg}"`).join(', ')}]\n`
+          }
+
+          // Add env vars if provided
+          if (server.env && Object.keys(server.env).length > 0) {
+            configToml += `env = { ${Object.entries(server.env)
+              .map(([key, value]) => `"${key}" = "${value}"`)
+              .join(', ')} }\n`
+          }
+
+          await logger.info('Added local MCP server')
+        } else {
+          // Remote HTTP/SSE server
+          configToml += `
+[mcp_servers.${serverName}]
+url = "${server.baseUrl}"
+`
+          // Add bearer token if available (using oauthClientSecret)
+          if (server.oauthClientSecret) {
+            configToml += `bearer_token = "${server.oauthClientSecret}"\n`
+          }
+
+          await logger.info('Added remote MCP server')
+        }
+      }
+    }
+
+    if (logger) {
+      await logger.info('Creating Codex configuration file...')
+    }
+
     const configSetupResult = await sandbox.runCommand({
       cmd: 'sh',
       args: ['-c', `mkdir -p ~/.codex && cat > ~/.codex/config.toml << 'EOF'\n${configToml}EOF`],
@@ -172,37 +245,50 @@ log_requests = true
     })
 
     if (logger) {
-      await logger.info(`Codex config setup: ${configSetupResult.exitCode === 0 ? 'SUCCESS' : 'FAILED'}`)
+      await logger.info('Codex config setup completed')
     }
 
-    // Debug: Check if the config file was created correctly
+    // Debug: Check if the config file was created correctly (without logging sensitive contents)
     const configCheckResult = await sandbox.runCommand({
-      cmd: 'cat',
-      args: ['~/.codex/config.toml'],
+      cmd: 'test',
+      args: ['-f', '~/.codex/config.toml'],
       env: { HOME: '/home/vercel-sandbox' },
       sudo: false,
     })
 
     if (logger && configCheckResult.exitCode === 0) {
-      await logger.info('Config file contents verified')
+      await logger.info('Config file verified')
     }
 
     // Debug: List files in the current directory before running Codex
     const lsDebugResult = await runCommandInSandbox(sandbox, 'ls', ['-la'])
     if (logger) {
-      await logger.info(`Current directory contents:\n${lsDebugResult.output || 'No output from ls -la'}`)
+      await logger.info('Current directory contents retrieved')
     }
 
     // Debug: Show current working directory
     const pwdResult = await runCommandInSandbox(sandbox, 'pwd', [])
     if (logger) {
-      await logger.info(`Current working directory: ${pwdResult.output || 'Unknown'}`)
+      await logger.info('Current working directory retrieved')
     }
 
     // Use exec command with Vercel AI Gateway configuration
     // The model is now configured in config.toml, so we can use it directly
     // Use --dangerously-bypass-approvals-and-sandbox (no --cd flag like other agents)
-    const logCommand = `codex exec --dangerously-bypass-approvals-and-sandbox "${instruction}"`
+    // If resuming, use 'codex resume' instead of 'codex exec'
+    let codexCommand = 'codex exec --dangerously-bypass-approvals-and-sandbox'
+
+    if (isResumed) {
+      // Use resume command instead of exec
+      // Note: codex resume doesn't take session ID as an argument, it uses a picker or --last
+      // For now, we'll use --last to continue the most recent session
+      codexCommand = 'codex resume --last'
+      if (logger) {
+        await logger.info('Resuming previous Codex conversation')
+      }
+    }
+
+    const logCommand = `${codexCommand} "${instruction}"`
 
     await logger.command(logCommand)
     if (logger) {
@@ -216,7 +302,7 @@ log_requests = true
     // Use the same pattern as other working agents (Claude, etc.)
     // Execute with environment variables using sh -c like Claude does
     const envPrefix = `AI_GATEWAY_API_KEY="${process.env.AI_GATEWAY_API_KEY}" HOME="/home/vercel-sandbox" CI="true"`
-    const fullCommand = `${envPrefix} codex exec --dangerously-bypass-approvals-and-sandbox "${instruction}"`
+    const fullCommand = `${envPrefix} ${codexCommand} "${instruction}"`
 
     // Use the standard runCommandInSandbox helper like other agents
     const result = await runCommandInSandbox(sandbox, 'sh', ['-c', fullCommand])
@@ -240,6 +326,19 @@ log_requests = true
 
     // Codex CLI execution completed
 
+    // Extract session ID from output if present (for resumption)
+    // Note: Codex uses --last to resume, so we may not need explicit session IDs
+    // But we'll extract it if available
+    let extractedSessionId: string | undefined
+    try {
+      const sessionMatch = result.output?.match(/(?:session[_\s-]?id|Session)[:\s]+([a-f0-9-]+)/i)
+      if (sessionMatch) {
+        extractedSessionId = sessionMatch[1]
+      }
+    } catch {
+      // Ignore parsing errors
+    }
+
     // Check if any files were modified
     const gitStatusCheck = await runAndLogCommand(sandbox, 'git', ['status', '--porcelain'], logger)
     const hasChanges = gitStatusCheck.success && gitStatusCheck.output?.trim()
@@ -252,6 +351,7 @@ log_requests = true
         cliName: 'codex',
         changesDetected: !!hasChanges,
         error: undefined,
+        sessionId: extractedSessionId, // Include session ID if available
       }
     } else {
       return {
@@ -260,6 +360,7 @@ log_requests = true
         agentResponse: result.output,
         cliName: 'codex',
         changesDetected: !!hasChanges,
+        sessionId: extractedSessionId, // Include session ID even on failure
       }
     }
   } catch (error: unknown) {
