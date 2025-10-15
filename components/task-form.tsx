@@ -588,6 +588,8 @@ export function TaskForm({
                 )}
               </div>
 
+              {/* Options and Submit Buttons */}
+
               {/* Buttons - right side */}
               <div className="flex items-center gap-2">
                 <TooltipProvider delayDuration={1500} skipDelayDuration={1500}>
@@ -716,6 +718,34 @@ export function TaskForm({
           </div>
         </div>
       </form>
+
+      {/* Additional Tools */}
+      <div className="mt-4 flex justify-center">
+        <ImageGenerator />
+      </div>
+
+      <ApiKeysDialog
+        open={showApiKeysDialog}
+        onOpenChange={(open) => {
+          setShowApiKeysDialog(open)
+          // Refetch API keys when dialog closes to update the saved keys state
+          if (!open) {
+            fetch('/api/api-keys')
+              .then((res) => res.json())
+              .then((data) => {
+                if (data.success) {
+                  const saved = new Set<Provider>()
+                  data.apiKeys.forEach((key: { provider: Provider }) => {
+                    saved.add(key.provider)
+                  })
+                  setSavedApiKeys(saved)
+                }
+              })
+              .catch((error) => console.error('Error refetching API keys:', error))
+          }
+        }}
+      />
+      <ConnectorDialog open={showMcpServersDialog} onOpenChange={setShowMcpServersDialog} />
     </div>
   )
 }
